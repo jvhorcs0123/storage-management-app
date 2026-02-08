@@ -1,0 +1,1094 @@
+"use client";
+
+import React from "react";
+import Link from "next/link";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  addDoc,
+  collection,
+  doc,
+  increment,
+  onSnapshot,
+  updateDoc,
+  writeBatch,
+} from "firebase/firestore";
+import { db } from "@/lib/firebase";
+import { useAuth } from "@/components/AuthProvider";
+import MultiSelect from "@/components/MultiSelect";
+import { logAction } from "@/lib/logs";
+
+type ProductRow = {
+  id: string;
+  category: string;
+  product: string;
+  sku: string;
+  unit: string;
+  totalQty: number;
+  onhandQty: number;
+  unitPrice: number;
+  notes?: string;
+};
+
+type CategoryRow = {
+  id: string;
+  name: string;
+};
+
+type ProductFormState = {
+  product: string;
+  category: string;
+  sku: string;
+  unit: string;
+  quantity: string;
+  unitPrice: string;
+  notes: string;
+};
+
+const emptyProductForm: ProductFormState = {
+  product: "",
+  category: "",
+  sku: "",
+  unit: "",
+  quantity: "",
+  unitPrice: "",
+  notes: "",
+};
+
+function formatCurrency(value: number) {
+  return new Intl.NumberFormat("en-PH", {
+    style: "currency",
+    currency: "PHP",
+    currencyDisplay: "narrowSymbol",
+  }).format(value);
+}
+
+const iconBase = "h-4 w-4";
+const iconButton =
+  "inline-flex items-center justify-center rounded-lg border border-slate-200 p-2 text-slate-600 transition hover:border-slate-400 hover:text-slate-900";
+
+const PlusIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M12 5v14M5 12h14"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
+const TagIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M7 5h6l6 6-6 6-6-6V5Z"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+    />
+    <circle cx="10" cy="9" r="1.2" fill="currentColor" />
+  </svg>
+);
+
+const ListIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
+const EditIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M4 20h4l11-11-4-4L4 16v4Z"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const NoteIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M6 4h8l4 4v12H6V4Z"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M8 12h8M8 16h6"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
+const TrashIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M4 7h16M9 7V5h6v2M7 7l1 12h8l1-12"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const IncomingIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M4 7h16v10H4V7Z"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M12 4v6m0 0 3-3m-3 3-3-3"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+function Modal({
+  title,
+  open,
+  onClose,
+  children,
+}: {
+  title: string;
+  open: boolean;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-3 sm:p-4 md:items-center md:p-6">
+      <div className="w-[calc(100%-0.75rem)] max-w-2xl rounded-2xl bg-white p-5 shadow-2xl sm:w-[calc(100%-2rem)] sm:p-6 md:max-h-[90vh] md:overflow-y-auto">
+        <div className="flex items-center justify-between border-b border-slate-200 pb-4">
+          <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-500 transition hover:border-slate-400 hover:text-slate-700"
+          >
+            Close
+          </button>
+        </div>
+        <div className="pt-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+export default function ProductsPage() {
+  const { user, loading } = useAuth();
+  const [productModalOpen, setProductModalOpen] = useState(false);
+  const [categoryModalOpen, setCategoryModalOpen] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [categoryFilter, setCategoryFilter] = useState<string[]>([]);
+  const [productFilter, setProductFilter] = useState<string[]>([]);
+  const [skuFilter, setSkuFilter] = useState<string[]>([]);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [products, setProducts] = useState<ProductRow[]>([]);
+  const [categories, setCategories] = useState<CategoryRow[]>([]);
+  const [productForm, setProductForm] =
+    useState<ProductFormState>(emptyProductForm);
+  const [categoryName, setCategoryName] = useState("");
+  const [editingProduct, setEditingProduct] = useState<ProductRow | null>(null);
+  const [notesModalOpen, setNotesModalOpen] = useState(false);
+  const [notesPreview, setNotesPreview] = useState("");
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [incomingModalOpen, setIncomingModalOpen] = useState(false);
+  const [incomingProduct, setIncomingProduct] = useState<ProductRow | null>(null);
+  const [incomingQty, setIncomingQty] = useState("");
+  const [incomingSource, setIncomingSource] = useState("Restock");
+  const [error, setError] = useState<string | null>(null);
+  const selectAllRef = useRef<HTMLInputElement>(null);
+  const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+
+  const hasActiveFilters =
+    categoryFilter.length > 0 || productFilter.length > 0 || skuFilter.length > 0;
+
+  const categoryOptions = useMemo(
+    () => Array.from(new Set(products.map((row) => row.category))).sort(),
+    [products],
+  );
+  const productOptions = useMemo(
+    () => Array.from(new Set(products.map((row) => row.product))).sort(),
+    [products],
+  );
+  const skuOptions = useMemo(
+    () => Array.from(new Set(products.map((row) => row.sku))).sort(),
+    [products],
+  );
+
+  const filteredProducts = useMemo(
+    () =>
+      products.filter((row) => {
+        const categoryMatch =
+          categoryFilter.length === 0 || categoryFilter.includes(row.category);
+        const productMatch =
+          productFilter.length === 0 || productFilter.includes(row.product);
+        const skuMatch = skuFilter.length === 0 || skuFilter.includes(row.sku);
+        return categoryMatch && productMatch && skuMatch;
+      }),
+    [products, categoryFilter, productFilter, skuFilter],
+  );
+
+  const visibleIds = filteredProducts.map((row) => row.id);
+  const allSelected =
+    visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id));
+  const someSelected =
+    visibleIds.some((id) => selectedIds.includes(id)) && !allSelected;
+
+  useEffect(() => {
+    if (!user) return;
+    const productsRef = collection(db, "products");
+    const categoriesRef = collection(db, "categories");
+
+    const unsubscribeProducts = onSnapshot(productsRef, (snapshot) => {
+      const nextProducts = snapshot.docs.map((docSnap) => {
+        const data = docSnap.data() as Omit<ProductRow, "id">;
+        return { id: docSnap.id, ...data };
+      });
+      nextProducts.sort((a, b) => a.product.localeCompare(b.product));
+      setProducts(nextProducts);
+    });
+
+    const unsubscribeCategories = onSnapshot(categoriesRef, (snapshot) => {
+      const nextCategories = snapshot.docs.map((docSnap) => {
+        const data = docSnap.data() as Omit<CategoryRow, "id">;
+        return { id: docSnap.id, ...data };
+      });
+      nextCategories.sort((a, b) => a.name.localeCompare(b.name));
+      setCategories(nextCategories);
+    });
+
+    return () => {
+      unsubscribeProducts();
+      unsubscribeCategories();
+    };
+  }, [user]);
+
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = Boolean(someSelected);
+    }
+  }, [someSelected]);
+
+  const toggleAll = () => {
+    if (allSelected) {
+      setSelectedIds((prev) => prev.filter((id) => !visibleIds.includes(id)));
+      return;
+    }
+    setSelectedIds((prev) => Array.from(new Set([...prev, ...visibleIds])));
+  };
+
+  const toggleOne = (id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((value) => value !== id) : [...prev, id],
+    );
+  };
+
+  const openNewProduct = () => {
+    setError(null);
+    setEditingProduct(null);
+    setProductForm(emptyProductForm);
+    setProductModalOpen(true);
+  };
+
+  const openEditProduct = (row: ProductRow) => {
+    setError(null);
+    setEditingProduct(row);
+    setProductForm({
+      product: row.product,
+      category: row.category,
+      sku: row.sku,
+      unit: row.unit,
+      quantity: String(row.totalQty),
+      unitPrice: String(row.unitPrice),
+      notes: row.notes ?? "",
+    });
+    setProductModalOpen(true);
+  };
+
+  const openIncoming = (row: ProductRow) => {
+    setIncomingProduct(row);
+    setIncomingQty("");
+    setIncomingSource("Restock");
+    setError(null);
+    setIncomingModalOpen(true);
+  };
+
+  const saveProduct = async () => {
+    setError(null);
+    const trimmedProduct = productForm.product.trim();
+    const trimmedCategory = productForm.category.trim();
+    const trimmedSku = productForm.sku.trim();
+    const trimmedUnit = productForm.unit.trim();
+    const quantity = Number(productForm.quantity);
+    const unitPrice = Number(productForm.unitPrice);
+
+    if (!trimmedProduct || !trimmedCategory || !trimmedUnit) {
+      setError("Product name, category, and unit are required.");
+      return;
+    }
+
+    if (Number.isNaN(quantity) || Number.isNaN(unitPrice)) {
+      setError("Quantity and unit price must be valid numbers.");
+      return;
+    }
+
+    const payload = {
+      product: trimmedProduct,
+      category: trimmedCategory,
+      sku: trimmedSku,
+      unit: trimmedUnit,
+      totalQty: quantity,
+      onhandQty: editingProduct ? editingProduct.onhandQty : quantity,
+      unitPrice,
+      notes: productForm.notes.trim(),
+    };
+
+    try {
+      if (editingProduct) {
+        await updateDoc(doc(db, "products", editingProduct.id), payload);
+        await logAction(user, {
+          action: `Edited ${payload.product}`,
+          entity: "product",
+          entityId: editingProduct.id,
+          entityName: payload.product,
+        });
+      } else {
+        const created = await addDoc(collection(db, "products"), payload);
+        await logAction(user, {
+          action: `Added ${payload.product}`,
+          entity: "product",
+          entityId: created.id,
+          entityName: payload.product,
+        });
+      }
+      setProductModalOpen(false);
+      setProductForm(emptyProductForm);
+      setEditingProduct(null);
+    } catch {
+      setError("Unable to save product. Please try again.");
+    }
+  };
+
+  const deleteSelectedProducts = async () => {
+    if (!selectedIds.length) return;
+    const batch = writeBatch(db);
+    const namesById = new Map(products.map((row) => [row.id, row.product]));
+    selectedIds.forEach((id) => batch.delete(doc(db, "products", id)));
+    await batch.commit();
+    for (const id of selectedIds) {
+      await logAction(user, {
+        action: `Deleted ${namesById.get(id) ?? "Product"}`,
+        entity: "product",
+        entityId: id,
+        entityName: namesById.get(id),
+      });
+    }
+    setSelectedIds([]);
+    setConfirmDeleteOpen(false);
+  };
+
+  const applyIncomingStock = async () => {
+    if (!incomingProduct) return;
+    const qty = Number(incomingQty);
+    if (!Number.isInteger(qty) || qty <= 0) {
+      setError("Incoming quantity must be a positive integer.");
+      return;
+    }
+    const updates =
+      incomingSource === "Restock"
+        ? { totalQty: increment(qty), onhandQty: increment(qty) }
+        : { onhandQty: increment(qty) };
+    await updateDoc(doc(db, "products", incomingProduct.id), updates);
+    await logAction(user, {
+      action:
+        incomingSource === "Restock"
+          ? `Restocked ${incomingProduct.product}`
+          : `Returned ${incomingProduct.product}`,
+      entity: "product",
+      entityId: incomingProduct.id,
+      entityName: incomingProduct.product,
+      details: { qty, source: incomingSource },
+    });
+    setIncomingModalOpen(false);
+  };
+
+  const saveCategory = async () => {
+    const trimmedName = categoryName.trim();
+    if (!trimmedName) {
+      setError("Category name is required.");
+      return;
+    }
+    try {
+      await addDoc(collection(db, "categories"), { name: trimmedName });
+      await logAction(user, {
+        action: `Added ${trimmedName}`,
+        entity: "category",
+        entityName: trimmedName,
+      });
+      setCategoryName("");
+      setCategoryModalOpen(false);
+    } catch {
+      setError("Unable to save category. Please try again.");
+    }
+  };
+
+  return (
+    <section className="space-y-6">
+      {loading && (
+        <div className="rounded-2xl border border-slate-200 bg-white px-4 py-6 text-sm text-slate-600 shadow-sm">
+          Loading...
+        </div>
+      )}
+      {!loading && !user && (
+        <div className="rounded-2xl border border-slate-200 bg-white px-4 py-6 text-sm text-slate-600 shadow-sm">
+          Please sign in to view products.
+        </div>
+      )}
+      {!loading && !user ? null : (
+        <>
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+            Products
+          </p>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-semibold text-slate-900">
+              Manage Products
+            </h1>
+            <button
+              type="button"
+              onClick={() => setFiltersOpen((prev) => !prev)}
+              className="relative inline-flex items-center justify-center rounded-lg border border-slate-200 p-2 text-slate-600 hover:border-slate-400 hover:text-slate-900"
+              aria-label="Toggle filters"
+              title="Toggle filters"
+            >
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none">
+                <path
+                  d="M4 6h16M7 12h10M10 18h4"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                />
+              </svg>
+              {hasActiveFilters && (
+                <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-emerald-500" />
+              )}
+            </button>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={openNewProduct}
+            className="inline-flex items-baseline gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-slate-800"
+          >
+            <span className="relative top-[1px] inline-flex">{PlusIcon}</span>
+            New Product
+          </button>
+          <button
+            type="button"
+            onClick={() => setCategoryModalOpen(true)}
+            className="inline-flex items-baseline gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:border-slate-400"
+          >
+            <span className="relative top-[1px] inline-flex">{TagIcon}</span>
+            New Category
+          </button>
+          <Link
+            href="/categories"
+            className="inline-flex items-baseline gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:border-slate-400"
+          >
+            <span className="relative top-[1px] inline-flex">{ListIcon}</span>
+            Category List
+          </Link>
+        </div>
+      </div>
+
+      {filtersOpen && (
+        <div className="grid gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:grid-cols-3">
+          <MultiSelect
+            label="Category"
+            options={categoryOptions}
+            values={categoryFilter}
+            onChange={setCategoryFilter}
+            placeholder="All categories"
+          />
+          <MultiSelect
+            label="Product"
+            options={productOptions}
+            values={productFilter}
+            onChange={setProductFilter}
+            placeholder="All products"
+          />
+          <MultiSelect
+            label="SKU"
+            options={skuOptions}
+            values={skuFilter}
+            onChange={setSkuFilter}
+            placeholder="All SKUs"
+          />
+        </div>
+      )}
+
+      {selectedIds.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+          <span className="text-sm font-medium text-slate-600">
+            {selectedIds.length} selected
+          </span>
+          <button
+            type="button"
+            onClick={() => setConfirmDeleteOpen(true)}
+            className="inline-flex items-center gap-2 rounded-lg bg-rose-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-rose-500"
+          >
+            <span className="inline-flex">{TrashIcon}</span>
+            Delete
+          </button>
+        </div>
+      )}
+
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="w-full">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+              <tr>
+                <th className="px-4 py-3">
+                  <input
+                    ref={selectAllRef}
+                    type="checkbox"
+                    className="h-4 w-4"
+                    checked={Boolean(allSelected)}
+                    onChange={toggleAll}
+                  />
+                </th>
+                <th className="px-4 py-3">Category</th>
+                <th className="px-4 py-3">Product</th>
+                <th className="px-4 py-3">SKU</th>
+                <th className="hidden px-4 py-3 md:table-cell">
+                  Unit of Measure
+                </th>
+                <th className="hidden px-4 py-3 md:table-cell">
+                  Total Quantity
+                </th>
+                <th className="hidden px-4 py-3 md:table-cell">
+                  Onhand Quantity
+                </th>
+                <th className="hidden px-4 py-3 md:table-cell">Unit Price</th>
+                <th className="hidden px-4 py-3 md:table-cell">
+                  Onhand Total
+                </th>
+                <th className="hidden px-4 py-3 md:table-cell">Total</th>
+                <th className="hidden px-4 py-3 md:table-cell">Actions</th>
+                <th className="px-4 py-3 text-right md:hidden">More</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filteredProducts.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={12}
+                    className="px-4 py-8 text-center text-sm text-slate-500"
+                  >
+                    No products found.
+                  </td>
+                </tr>
+              )}
+              {filteredProducts.map((row) => (
+                <React.Fragment key={row.id}>
+                  <tr
+                    className={`transition hover:bg-slate-50 ${
+                      selectedIds.includes(row.id)
+                        ? "bg-slate-50 ring-1 ring-inset ring-slate-200"
+                        : ""
+                    }`}
+                  >
+                    <td className="px-4 py-3">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4"
+                        checked={selectedIds.includes(row.id)}
+                        onChange={() => toggleOne(row.id)}
+                      />
+                    </td>
+                    <td className="px-4 py-3 font-medium text-slate-700">
+                      {row.category}
+                    </td>
+                    <td className="px-4 py-3 text-slate-700">{row.product}</td>
+                    <td className="px-4 py-3 text-slate-500">{row.sku}</td>
+                    <td className="hidden px-4 py-3 text-slate-500 md:table-cell">
+                      {row.unit}
+                    </td>
+                    <td className="hidden px-4 py-3 text-slate-500 md:table-cell">
+                      {row.totalQty.toLocaleString()}
+                    </td>
+                    <td className="hidden px-4 py-3 text-slate-500 md:table-cell">
+                      {row.onhandQty.toLocaleString()}
+                    </td>
+                    <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
+                      {formatCurrency(row.unitPrice)}
+                    </td>
+                    <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
+                      {formatCurrency(row.onhandQty * row.unitPrice)}
+                    </td>
+                    <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
+                      {formatCurrency(row.totalQty * row.unitPrice)}
+                    </td>
+                    <td className="hidden px-4 py-3 md:table-cell">
+                      <button
+                        type="button"
+                        onClick={() => openEditProduct(row)}
+                        className={iconButton}
+                        aria-label="Edit product"
+                        title="Edit"
+                      >
+                        {EditIcon}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNotesPreview(row.notes?.trim() || "No notes added.");
+                          setNotesModalOpen(true);
+                        }}
+                        className={`${iconButton} ml-2`}
+                        aria-label="View notes"
+                        title="Notes"
+                      >
+                        {NoteIcon}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openIncoming(row)}
+                        className={`${iconButton} ml-2`}
+                        aria-label="Incoming stocks"
+                        title="Incoming Stocks"
+                      >
+                        {IncomingIcon}
+                      </button>
+                    </td>
+                    <td className="px-4 py-3 text-right md:hidden">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedRows((prev) => ({
+                            ...prev,
+                            [row.id]: !prev[row.id],
+                          }))
+                        }
+                        className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600"
+                      >
+                        {expandedRows[row.id] ? "Hide" : "View"}
+                      </button>
+                    </td>
+                  </tr>
+                  {expandedRows[row.id] && (
+                    <tr className="md:hidden">
+                      <td colSpan={12} className="px-4 pb-4">
+                        <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-semibold uppercase text-slate-500">
+                              Unit of Measure
+                            </span>
+                            <span>{row.unit}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-semibold uppercase text-slate-500">
+                              Total Qty
+                            </span>
+                            <span>{row.totalQty.toLocaleString()}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-semibold uppercase text-slate-500">
+                              Onhand Qty
+                            </span>
+                            <span>{row.onhandQty.toLocaleString()}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-semibold uppercase text-slate-500">
+                              Unit Price
+                            </span>
+                            <span>{formatCurrency(row.unitPrice)}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-semibold uppercase text-slate-500">
+                              Onhand Total
+                            </span>
+                            <span>
+                              {formatCurrency(row.onhandQty * row.unitPrice)}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-semibold uppercase text-slate-500">
+                              Total
+                            </span>
+                            <span>
+                              {formatCurrency(row.totalQty * row.unitPrice)}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 pt-2">
+                            <button
+                              type="button"
+                              onClick={() => openEditProduct(row)}
+                              className={iconButton}
+                              aria-label="Edit product"
+                              title="Edit"
+                            >
+                              {EditIcon}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setNotesPreview(
+                                  row.notes?.trim() || "No notes added.",
+                                );
+                                setNotesModalOpen(true);
+                              }}
+                              className={iconButton}
+                              aria-label="View notes"
+                              title="Notes"
+                            >
+                              {NoteIcon}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openIncoming(row)}
+                              className={iconButton}
+                              aria-label="Incoming stocks"
+                              title="Incoming Stocks"
+                            >
+                              {IncomingIcon}
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <Modal
+        title={editingProduct ? "Edit Product" : "New Product"}
+        open={productModalOpen}
+        onClose={() => {
+          setProductModalOpen(false);
+          setError(null);
+        }}
+      >
+        <form
+          className="grid gap-4 md:grid-cols-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            saveProduct();
+          }}
+        >
+          <label className="text-sm font-medium text-slate-700">
+            Product Name
+            <input
+              type="text"
+              value={productForm.product}
+              onChange={(event) =>
+                setProductForm((prev) => ({
+                  ...prev,
+                  product: event.target.value,
+                }))
+              }
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            />
+          </label>
+          <label className="text-sm font-medium text-slate-700">
+            Category
+            <select
+              value={productForm.category}
+              onChange={(event) =>
+                setProductForm((prev) => ({
+                  ...prev,
+                  category: event.target.value,
+                }))
+              }
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            >
+              <option value="">Select category</option>
+              {categories.map((category) => (
+                <option key={category.id} value={category.name}>
+                  {category.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-sm font-medium text-slate-700">
+            Product Number (SKU)
+            <input
+              type="text"
+              value={productForm.sku}
+              onChange={(event) =>
+                setProductForm((prev) => ({
+                  ...prev,
+                  sku: event.target.value,
+                }))
+              }
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            />
+          </label>
+          <label className="text-sm font-medium text-slate-700">
+            Unit of Measure
+            <input
+              type="text"
+              value={productForm.unit}
+              onChange={(event) =>
+                setProductForm((prev) => ({
+                  ...prev,
+                  unit: event.target.value,
+                }))
+              }
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            />
+          </label>
+          <label className="text-sm font-medium text-slate-700">
+            Quantity
+            <input
+              type="number"
+              value={productForm.quantity}
+              readOnly={Boolean(editingProduct)}
+              onChange={(event) =>
+                setProductForm((prev) => ({
+                  ...prev,
+                  quantity: event.target.value,
+                }))
+              }
+              className={`mt-2 w-full rounded-xl border px-3 py-2 text-sm ${
+                editingProduct
+                  ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-500"
+                  : "border-slate-200"
+              }`}
+            />
+          </label>
+          <label className="text-sm font-medium text-slate-700">
+            Unit Price
+            <input
+              type="number"
+              value={productForm.unitPrice}
+              onChange={(event) =>
+                setProductForm((prev) => ({
+                  ...prev,
+                  unitPrice: event.target.value,
+                }))
+              }
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            />
+          </label>
+          <label className="text-sm font-medium text-slate-700 md:col-span-2">
+            Notes
+            <textarea
+              value={productForm.notes}
+              onChange={(event) =>
+                setProductForm((prev) => ({
+                  ...prev,
+                  notes: event.target.value,
+                }))
+              }
+              className="mt-2 min-h-[100px] w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            />
+          </label>
+          {error && (
+            <p className="md:col-span-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+              {error}
+            </p>
+          )}
+          <div className="md:col-span-2 flex flex-wrap justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={() => setProductModalOpen(false)}
+              className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+            >
+              Save
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        title="Product Notes"
+        open={notesModalOpen}
+        onClose={() => setNotesModalOpen(false)}
+      >
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700">
+          {notesPreview}
+        </div>
+      </Modal>
+
+      <Modal
+        title="Incoming Stocks"
+        open={incomingModalOpen}
+        onClose={() => setIncomingModalOpen(false)}
+      >
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            applyIncomingStock();
+          }}
+        >
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+            <p className="font-semibold text-slate-900">
+              {incomingProduct?.product ?? "Selected product"}
+            </p>
+            <p className="text-xs text-slate-500">
+              Current Onhand: {incomingProduct?.onhandQty ?? 0} · Total:{" "}
+              {incomingProduct?.totalQty ?? 0}
+            </p>
+          </div>
+          <label className="block text-sm font-medium text-slate-700">
+            QTY
+            <input
+              type="number"
+              value={incomingQty}
+              onChange={(event) => setIncomingQty(event.target.value)}
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            />
+          </label>
+          <label className="block text-sm font-medium text-slate-700">
+            Source
+            <select
+              value={incomingSource}
+              onChange={(event) => setIncomingSource(event.target.value)}
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            >
+              <option value="Restock">Restock</option>
+              <option value="Returns">Returns</option>
+            </select>
+          </label>
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+            <p className="font-semibold">How this affects quantities</p>
+            <p className="mt-1">
+              Restock increases both Onhand and Total quantities.
+            </p>
+            <p>Returns increase Onhand only (Total stays the same).</p>
+          </div>
+          {error && (
+            <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+              {error}
+            </p>
+          )}
+          <div className="flex flex-wrap justify-end gap-3">
+            <button
+              type="button"
+              onClick={() => setIncomingModalOpen(false)}
+              className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+            >
+              Save
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        title="Confirm Delete"
+        open={confirmDeleteOpen}
+        onClose={() => setConfirmDeleteOpen(false)}
+      >
+        <div className="space-y-4 text-sm text-slate-700">
+          <p>
+            Delete {selectedIds.length} selected product
+            {selectedIds.length === 1 ? "" : "s"}? This action cannot be undone.
+          </p>
+          <div className="flex flex-wrap justify-end gap-3">
+            <button
+              type="button"
+              onClick={() => setConfirmDeleteOpen(false)}
+              className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={deleteSelectedProducts}
+              className="inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white"
+            >
+              <span className="inline-flex">{TrashIcon}</span>
+              Delete
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        title="New Category"
+        open={categoryModalOpen}
+        onClose={() => {
+          setCategoryModalOpen(false);
+          setError(null);
+        }}
+      >
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            saveCategory();
+          }}
+        >
+          <label className="block text-sm font-medium text-slate-700">
+            Category Name
+            <input
+              type="text"
+              value={categoryName}
+              onChange={(event) => setCategoryName(event.target.value)}
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            />
+          </label>
+          {error && (
+            <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+              {error}
+            </p>
+          )}
+          <div className="flex flex-wrap justify-end gap-3">
+            <button
+              type="button"
+              onClick={() => setCategoryModalOpen(false)}
+              className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+            >
+              Save
+            </button>
+          </div>
+        </form>
+      </Modal>
+        </>
+      )}
+    </section>
+  );
+}

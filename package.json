@@ -9,6 +9,10 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "firebase": "^12.9.0",
+    "firebase-admin": "^12.5.0",
+    "jspdf": "^2.5.2",
+    "jspdf-autotable": "^3.8.3",
     "next": "16.1.6",
     "react": "19.2.3",
     "react-dom": "19.2.3"
