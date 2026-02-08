@@ -98,6 +98,7 @@ export default function SettingsPage() {
   const [employees, setEmployees] = useState<EmployeeRow[]>([]);
   const [pendingUsers, setPendingUsers] = useState<PendingRow[]>([]);
   const [actionError, setActionError] = useState("");
+  const [outgoingError, setOutgoingError] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
   const [confirmModal, setConfirmModal] = useState<{
     title: string;
@@ -428,9 +429,10 @@ export default function SettingsPage() {
 
   const handleExportOutgoingPdf = () => {
     if (filteredOutgoing.length === 0) {
-      setActionError("No outgoing products to export for this date.");
+      setOutgoingError("No outgoing products to export for this date.");
       return;
     }
+    setOutgoingError("");
     const docPdf = new jsPDF();
     const now = new Date();
     const header = `Outgoing Products - ${outgoingDateFilter || "All Dates"}`;
@@ -940,6 +942,11 @@ export default function SettingsPage() {
               </button>
             </div>
           </div>
+          {outgoingError && (
+            <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+              {outgoingError}
+            </p>
+          )}
           <div className="w-full">
             <table className="w-full text-sm">
               <thead className="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
