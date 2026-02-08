@@ -342,11 +342,7 @@ export default function SettingsPage() {
     }
 
     try {
-      if (
-        savedUserType === "admin" &&
-        profileUserType === "employee" &&
-        savedUserType !== profileUserType
-      ) {
+      if (savedUserType === "admin" && profileUserType === "employee") {
         const adminsSnapshot = await getDocs(
           query(collection(db, "users"), where("userType", "==", "admin")),
         );
