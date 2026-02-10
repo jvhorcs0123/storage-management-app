@@ -6,10 +6,12 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
   onSnapshot,
   orderBy,
   query,
   setDoc,
+  Timestamp,
   where,
 } from "firebase/firestore";
 import {
@@ -24,15 +26,23 @@ import autoTable from "jspdf-autotable";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/components/AuthProvider";
 import { logAction } from "@/lib/logs";
+import TablePagination from "@/components/TablePagination";
 
-type OutgoingRow = {
+type TransactionRow = {
   id: string;
+  productId?: string;
+  type: string;
   product: string;
   category: string;
+  sku: string;
   unit: string;
-  qty: number;
+  qtyIn: number;
+  qtyOut: number;
   price: number;
+  total: number;
   date: string;
+  ref: string;
+  balance?: number;
 };
 
 type LogRow = {
@@ -68,14 +78,34 @@ function formatCurrency(value: number) {
 export default function SettingsPage() {
   const { user } = useAuth();
   const today = new Date().toISOString().slice(0, 10);
-  const [outgoingDateFilter, setOutgoingDateFilter] = useState(today);
+  const pageSize = 10;
+  const [txnDateFilter, setTxnDateFilter] = useState({
+    from: today,
+    to: today,
+  });
   const [logsDateFilter, setLogsDateFilter] = useState({
     from: today,
     to: today,
   });
-  const [outgoingRows, setOutgoingRows] = useState<OutgoingRow[]>([]);
+  const [transactionRows, setTransactionRows] = useState<TransactionRow[]>([]);
+  const [productsMap, setProductsMap] = useState<
+    Record<
+      string,
+      {
+        id: string;
+        product: string;
+        category: string;
+        sku: string;
+        unit: string;
+        onhandQty: number;
+        unitPrice: number;
+      }
+    >
+  >({});
   const [logs, setLogs] = useState<LogRow[]>([]);
-  const [expandedOutgoing, setExpandedOutgoing] = useState<Record<string, boolean>>({});
+  const [expandedTransactions, setExpandedTransactions] = useState<
+    Record<string, boolean>
+  >({});
   const [expandedLogs, setExpandedLogs] = useState<Record<string, boolean>>({});
   const [profileEditing, setProfileEditing] = useState(false);
   const [profileName, setProfileName] = useState("");
@@ -98,8 +128,16 @@ export default function SettingsPage() {
   const [employees, setEmployees] = useState<EmployeeRow[]>([]);
   const [pendingUsers, setPendingUsers] = useState<PendingRow[]>([]);
   const [actionError, setActionError] = useState("");
-  const [outgoingError, setOutgoingError] = useState("");
+  const [transactionError, setTransactionError] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
+  const [txnPage, setTxnPage] = useState(1);
+  const [txnShowAll, setTxnShowAll] = useState(false);
+  const [logPage, setLogPage] = useState(1);
+  const [logShowAll, setLogShowAll] = useState(false);
+  const [employeePage, setEmployeePage] = useState(1);
+  const [employeeShowAll, setEmployeeShowAll] = useState(false);
+  const [pendingPage, setPendingPage] = useState(1);
+  const [pendingShowAll, setPendingShowAll] = useState(false);
   const [confirmModal, setConfirmModal] = useState<{
     title: string;
     message: string;
@@ -110,7 +148,7 @@ export default function SettingsPage() {
   const [resetTarget, setResetTarget] = useState<EmployeeRow | null>(null);
 
   useEffect(() => {
-    setOutgoingDateFilter(today);
+    setTxnDateFilter({ from: today, to: today });
     setLogsDateFilter({ from: today, to: today });
   }, [today]);
 
@@ -136,13 +174,60 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (!user) return;
+    const productsRef = collection(db, "products");
+    const unsubscribe = onSnapshot(productsRef, (snapshot) => {
+      const map: Record<
+        string,
+        {
+          id: string;
+          product: string;
+          category: string;
+          sku: string;
+          unit: string;
+          onhandQty: number;
+          unitPrice: number;
+        }
+      > = {};
+      snapshot.docs.forEach((docSnap) => {
+        const data = docSnap.data() as {
+          product?: string;
+          category?: string;
+          sku?: string;
+          unit?: string;
+          onhandQty?: number;
+          unitPrice?: number;
+        };
+        if (!data.product) return;
+        map[data.product] = {
+          id: docSnap.id,
+          product: data.product,
+          category: data.category ?? "",
+          sku: data.sku ?? "",
+          unit: data.unit ?? "",
+          onhandQty: data.onhandQty ?? 0,
+          unitPrice: data.unitPrice ?? 0,
+        };
+      });
+      setProductsMap(map);
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
     const deliveriesRef = collection(db, "deliveries");
-    const deliveriesQuery = query(deliveriesRef, where("status", "==", "Closed"));
-    const unsubscribe = onSnapshot(deliveriesQuery, (snapshot) => {
-      const rows: OutgoingRow[] = [];
+    const from = txnDateFilter.from;
+    const to = txnDateFilter.to;
+    const constraints = [where("status", "==", "Closed")];
+    if (from) constraints.push(where("drDate", ">=", from));
+    if (to) constraints.push(where("drDate", "<=", to));
+    const deliveriesQuery = query(deliveriesRef, ...constraints);
+    const unsubscribeDeliveries = onSnapshot(deliveriesQuery, (snapshot) => {
+      const rows: TransactionRow[] = [];
       snapshot.docs.forEach((docSnap) => {
         const data = docSnap.data() as {
           drDate?: string;
+          drNo?: string;
           items?: Array<{
             productName?: string;
             category?: string;
@@ -153,21 +238,112 @@ export default function SettingsPage() {
         };
         const date = data.drDate ?? "";
         data.items?.forEach((item, index) => {
+          const productName = item.productName ?? "Unknown";
+          const productInfo = productsMap[productName];
+          const qty = item.quantity ?? 0;
+          const price = item.price ?? productInfo?.unitPrice ?? 0;
           rows.push({
-            id: `${docSnap.id}-${index}`,
-            product: item.productName ?? "Unknown",
-            category: item.category ?? "",
-            unit: item.unit ?? "",
-            qty: item.quantity ?? 0,
-            price: item.price ?? 0,
+            id: `delivery-${docSnap.id}-${index}`,
+            productId: productInfo?.id,
+            type: "Outgoing (Delivery)",
+            product: productName,
+            category: item.category ?? productInfo?.category ?? "",
+            sku: productInfo?.sku ?? "",
+            unit: item.unit ?? productInfo?.unit ?? "",
+            qtyIn: 0,
+            qtyOut: qty,
+            price,
+            total: qty * price,
             date,
+            ref: data.drNo ?? "",
           });
         });
       });
-      setOutgoingRows(rows);
+      setTransactionRows((prev) => {
+        const merged = rows.filter(Boolean);
+        return merged;
+      });
     });
-    return () => unsubscribe();
-  }, [user]);
+
+    const logsRef = collection(db, "userLogs");
+    const logConstraints = [orderBy("createdAt", "desc"), limit(500)];
+    const fromTs = txnDateFilter.from
+      ? Timestamp.fromDate(new Date(`${txnDateFilter.from}T00:00:00`))
+      : null;
+    const toTs = txnDateFilter.to
+      ? Timestamp.fromDate(new Date(`${txnDateFilter.to}T23:59:59`))
+      : null;
+    if (fromTs) logConstraints.push(where("createdAt", ">=", fromTs));
+    if (toTs) logConstraints.push(where("createdAt", "<=", toTs));
+    const logsQuery = query(logsRef, ...logConstraints);
+    const unsubscribeLogs = onSnapshot(logsQuery, (snapshot) => {
+      const rows: TransactionRow[] = snapshot.docs
+        .map((docSnap) => {
+          const data = docSnap.data() as {
+            action?: string;
+            entityId?: string;
+            entityName?: string;
+            createdAt?: { toDate: () => Date };
+            details?: { qty?: number; source?: string; destination?: string };
+          };
+          if (!data.action) return null;
+          const createdAt = data.createdAt?.toDate?.();
+          const date = createdAt ? createdAt.toISOString().slice(0, 10) : "";
+          const qty = data.details?.qty ?? 0;
+          const productName = data.entityName ?? "";
+          const productInfo = productsMap[productName];
+          const price = productInfo?.unitPrice ?? 0;
+          if (data.action.startsWith("Restocked") || data.action.startsWith("Returned")) {
+            return {
+              id: `log-${docSnap.id}`,
+              productId: data.entityId,
+              type: data.action.startsWith("Restocked")
+                ? "Incoming (Restock)"
+                : "Incoming (Return)",
+              product: productName,
+              category: productInfo?.category ?? "",
+              sku: productInfo?.sku ?? "",
+              unit: productInfo?.unit ?? "",
+              qtyIn: qty,
+              qtyOut: 0,
+              price,
+              total: qty * price,
+              date,
+              ref: data.details?.source ?? "",
+            };
+          }
+          if (data.action.startsWith("Outgoing")) {
+            return {
+              id: `log-${docSnap.id}`,
+              productId: data.entityId,
+              type: "Outgoing",
+              product: productName,
+              category: productInfo?.category ?? "",
+              sku: productInfo?.sku ?? "",
+              unit: productInfo?.unit ?? "",
+              qtyIn: 0,
+              qtyOut: qty,
+              price,
+              total: qty * price,
+              date,
+              ref: data.details?.destination ?? "",
+            };
+          }
+          return null;
+        })
+        .filter((row): row is TransactionRow => Boolean(row));
+
+      setTransactionRows((prev) => {
+        const deliveryRows = prev.filter((row) => row.id.startsWith("delivery-"));
+        return [...deliveryRows, ...rows];
+      });
+    });
+
+    return () => {
+      unsubscribeDeliveries();
+      unsubscribeLogs();
+    };
+  }, [user, txnDateFilter.from, txnDateFilter.to, productsMap]);
 
   useEffect(() => {
     if (!user) return;
@@ -253,13 +429,32 @@ export default function SettingsPage() {
     };
   }, [user, profileUserType]);
 
-  const filteredOutgoing = useMemo(
-    () =>
-      outgoingRows.filter((row) =>
-        outgoingDateFilter ? row.date === outgoingDateFilter : true,
-      ),
-    [outgoingDateFilter, outgoingRows],
-  );
+  const filteredTransactions = useMemo(() => {
+    const grouped: Record<string, TransactionRow[]> = {};
+    transactionRows.forEach((row) => {
+      const key = row.productId ?? row.product;
+      grouped[key] = grouped[key] ? [...grouped[key], row] : [row];
+    });
+
+    const withBalance: TransactionRow[] = [];
+    Object.entries(grouped).forEach(([key, rows]) => {
+      const sorted = [...rows].sort((a, b) => a.date.localeCompare(b.date));
+      const productInfo = Object.values(productsMap).find(
+        (item) => item.id === key || item.product === key,
+      );
+      const netMovement = sorted.reduce(
+        (acc, row) => acc + row.qtyIn - row.qtyOut,
+        0,
+      );
+      let balance = (productInfo?.onhandQty ?? 0) - netMovement;
+      sorted.forEach((row) => {
+        balance += row.qtyIn - row.qtyOut;
+        withBalance.push({ ...row, balance });
+      });
+    });
+
+    return withBalance.sort((a, b) => b.date.localeCompare(a.date));
+  }, [transactionRows, productsMap]);
 
   const filteredLogs = useMemo(
     () => {
@@ -273,6 +468,35 @@ export default function SettingsPage() {
     },
     [logsDateFilter, logs],
   );
+
+  const pagedTransactions = useMemo(() => {
+    if (txnShowAll) return filteredTransactions;
+    const start = (txnPage - 1) * pageSize;
+    return filteredTransactions.slice(start, start + pageSize);
+  }, [filteredTransactions, txnPage, txnShowAll, pageSize]);
+
+  const pagedLogs = useMemo(() => {
+    if (logShowAll) return filteredLogs;
+    const start = (logPage - 1) * pageSize;
+    return filteredLogs.slice(start, start + pageSize);
+  }, [filteredLogs, logPage, logShowAll, pageSize]);
+
+  const pagedEmployees = useMemo(() => {
+    if (employeeShowAll) return employees;
+    const start = (employeePage - 1) * pageSize;
+    return employees.slice(start, start + pageSize);
+  }, [employees, employeePage, employeeShowAll, pageSize]);
+
+  const pagedPending = useMemo(() => {
+    if (pendingShowAll) return pendingUsers;
+    const start = (pendingPage - 1) * pageSize;
+    return pendingUsers.slice(start, start + pageSize);
+  }, [pendingUsers, pendingPage, pendingShowAll, pageSize]);
+
+  useEffect(() => setTxnPage(1), [filteredTransactions.length]);
+  useEffect(() => setLogPage(1), [filteredLogs.length]);
+  useEffect(() => setEmployeePage(1), [employees.length]);
+  useEffect(() => setPendingPage(1), [pendingUsers.length]);
 
   const userLabel =
     user?.displayName?.trim() ||
@@ -427,15 +651,17 @@ export default function SettingsPage() {
     });
   };
 
-  const handleExportOutgoingPdf = () => {
-    if (filteredOutgoing.length === 0) {
-      setOutgoingError("No outgoing products to export for this date.");
+  const handleExportTransactionsPdf = () => {
+    if (filteredTransactions.length === 0) {
+      setTransactionError("No transactions to export for this date range.");
       return;
     }
-    setOutgoingError("");
-    const docPdf = new jsPDF();
+    setTransactionError("");
+    const docPdf = new jsPDF({ orientation: "landscape" });
     const now = new Date();
-    const header = `Outgoing Products - ${outgoingDateFilter || "All Dates"}`;
+    const header = `Transaction History - ${txnDateFilter.from || "All"} to ${
+      txnDateFilter.to || "All"
+    }`;
     docPdf.setFontSize(14);
     docPdf.text(header, 14, 18);
     docPdf.setFontSize(10);
@@ -445,26 +671,48 @@ export default function SettingsPage() {
       26,
     );
 
-    const rows = filteredOutgoing.map((row) => [
+    const rows = filteredTransactions.map((row) => [
+      row.date,
+      row.type,
       row.product,
       row.category,
+      row.sku,
       row.unit,
-      String(row.qty),
+      row.qtyIn ? String(row.qtyIn) : "",
+      row.qtyOut ? String(row.qtyOut) : "",
+      row.balance !== undefined ? String(row.balance) : "",
       formatCurrency(row.price).replace(/[^0-9.,-]/g, ""),
-      formatCurrency(row.qty * row.price).replace(/[^0-9.,-]/g, ""),
-      row.date,
+      formatCurrency(row.total).replace(/[^0-9.,-]/g, ""),
+      row.ref,
     ]);
 
     autoTable(docPdf, {
       startY: 34,
-      head: [["Product", "Category", "UoM", "Qty", "Price", "Total", "Date"]],
+      head: [[
+        "Date",
+        "Type",
+        "Product",
+        "Category",
+        "SKU",
+        "UoM",
+        "In",
+        "Out",
+        "Balance",
+        "Price",
+        "Total",
+        "Reference",
+      ]],
       body: rows,
-      styles: { fontSize: 9 },
+      styles: { fontSize: 8 },
       headStyles: { fillColor: [15, 23, 42] },
     });
 
-    const totalValue = filteredOutgoing.reduce(
-      (acc, row) => acc + row.qty * row.price,
+    const totalIncomingValue = filteredTransactions.reduce(
+      (acc, row) => acc + (row.qtyIn ? row.total : 0),
+      0,
+    );
+    const totalOutgoingValue = filteredTransactions.reduce(
+      (acc, row) => acc + (row.qtyOut ? row.total : 0),
       0,
     );
     const finalY = (docPdf as { lastAutoTable?: { finalY: number } })
@@ -472,10 +720,16 @@ export default function SettingsPage() {
     const summaryY = finalY ? finalY + 8 : 40;
     docPdf.setFontSize(11);
     docPdf.text(
-      `Total: ${formatCurrency(totalValue).replace(/[^0-9.,-]/g, "")}`,
+      `Total Incoming: ${formatCurrency(totalIncomingValue).replace(/[^0-9.,-]/g, "")}`,
       14,
       summaryY,
     );
+    docPdf.text(
+      `Total Outgoing: ${formatCurrency(totalOutgoingValue).replace(/[^0-9.,-]/g, "")}`,
+      14,
+      summaryY + 8,
+    );
+    // Net is optional; keep only if needed in report.
 
     const blob = docPdf.output("blob");
     const url = URL.createObjectURL(blob);
@@ -733,7 +987,7 @@ export default function SettingsPage() {
           )}
 
           {activeUserTab === "employees" && (
-            <div className="w-full">
+            <div className="w-full space-y-3">
               <table className="w-full text-sm">
                 <thead className="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                   <tr>
@@ -753,7 +1007,7 @@ export default function SettingsPage() {
                       </td>
                     </tr>
                   )}
-                  {employees.map((employee) => (
+                  {pagedEmployees.map((employee) => (
                     <tr key={employee.id} className="hover:bg-slate-50">
                       <td className="px-4 py-3 text-slate-700">
                         {employee.name || employee.email}
@@ -829,11 +1083,19 @@ export default function SettingsPage() {
                   ))}
                 </tbody>
               </table>
+              <TablePagination
+                total={employees.length}
+                page={employeePage}
+                pageSize={pageSize}
+                showAll={employeeShowAll}
+                onPageChange={setEmployeePage}
+                onToggleShowAll={() => setEmployeeShowAll((prev) => !prev)}
+              />
             </div>
           )}
 
           {activeUserTab === "pending" && (
-            <div className="w-full">
+            <div className="w-full space-y-3">
               <table className="w-full text-sm">
                 <thead className="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                   <tr>
@@ -854,7 +1116,7 @@ export default function SettingsPage() {
                       </td>
                     </tr>
                   )}
-                  {pendingUsers.map((pending) => (
+                  {pagedPending.map((pending) => (
                     <tr key={pending.id} className="hover:bg-slate-50">
                       <td className="px-4 py-3 text-slate-700">
                         {pending.fullName || pending.email}
@@ -914,6 +1176,14 @@ export default function SettingsPage() {
                   ))}
                 </tbody>
               </table>
+              <TablePagination
+                total={pendingUsers.length}
+                page={pendingPage}
+                pageSize={pageSize}
+                showAll={pendingShowAll}
+                onPageChange={setPendingPage}
+                onToggleShowAll={() => setPendingShowAll((prev) => !prev)}
+              />
             </div>
           )}
         </div>
@@ -923,94 +1193,141 @@ export default function SettingsPage() {
         <div className="space-y-4 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">
-              Outgoing Products
+              Transaction History
             </h2>
             <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
-              <span>Date</span>
+              <span>From</span>
               <input
                 type="date"
-                value={outgoingDateFilter}
-                onChange={(event) => setOutgoingDateFilter(event.target.value)}
+                value={txnDateFilter.from}
+                onChange={(event) =>
+                  setTxnDateFilter((prev) => ({
+                    ...prev,
+                    from: event.target.value,
+                  }))
+                }
+                className="rounded-xl border border-slate-200 px-3 py-2 text-sm"
+              />
+              <span>To</span>
+              <input
+                type="date"
+                value={txnDateFilter.to}
+                onChange={(event) =>
+                  setTxnDateFilter((prev) => ({
+                    ...prev,
+                    to: event.target.value,
+                  }))
+                }
                 className="rounded-xl border border-slate-200 px-3 py-2 text-sm"
               />
               <button
                 type="button"
-                onClick={handleExportOutgoingPdf}
+                onClick={handleExportTransactionsPdf}
                 className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:border-slate-400"
               >
                 Export PDF
               </button>
             </div>
           </div>
-          {outgoingError && (
+          {transactionError && (
             <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
-              {outgoingError}
+              {transactionError}
             </p>
           )}
           <div className="w-full">
             <table className="w-full text-sm">
               <thead className="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                 <tr>
+                  <th className="px-4 py-3">Date</th>
+                  <th className="px-4 py-3">Type</th>
                   <th className="px-4 py-3">Product</th>
-                  <th className="px-4 py-3">Category</th>
+                  <th className="hidden px-4 py-3 md:table-cell">Category</th>
+                  <th className="hidden px-4 py-3 md:table-cell">SKU</th>
                   <th className="hidden px-4 py-3 md:table-cell">UoM</th>
-                  <th className="hidden px-4 py-3 md:table-cell">QTY</th>
+                  <th className="hidden px-4 py-3 md:table-cell">In</th>
+                  <th className="hidden px-4 py-3 md:table-cell">Out</th>
+                  <th className="hidden px-4 py-3 md:table-cell">Balance</th>
                   <th className="hidden px-4 py-3 md:table-cell">Price</th>
                   <th className="hidden px-4 py-3 md:table-cell">Total</th>
-                  <th className="hidden px-4 py-3 md:table-cell">Date</th>
+                  <th className="hidden px-4 py-3 md:table-cell">Reference</th>
                   <th className="px-4 py-3 text-right md:hidden">More</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredOutgoing.length === 0 && (
+                {filteredTransactions.length === 0 && (
                   <tr>
                     <td
-                      colSpan={8}
+                      colSpan={13}
                       className="px-4 py-6 text-center text-sm text-slate-500"
                     >
-                      No outgoing products for this date.
+                      No transactions for this date range.
                     </td>
                   </tr>
                 )}
-                {filteredOutgoing.map((row) => (
+                {pagedTransactions.map((row) => (
                   <React.Fragment key={row.id}>
                     <tr className="hover:bg-slate-50">
+                      <td className="px-4 py-3 text-slate-600">{row.date}</td>
+                      <td className="px-4 py-3 text-slate-700">{row.type}</td>
                       <td className="px-4 py-3 text-slate-700">{row.product}</td>
-                      <td className="px-4 py-3 text-slate-600">{row.category}</td>
                       <td className="hidden px-4 py-3 text-slate-600 md:table-cell">
+                        {row.category}
+                      </td>
+                      <td className="hidden px-4 py-3 text-slate-500 md:table-cell">
+                        {row.sku}
+                      </td>
+                      <td className="hidden px-4 py-3 text-slate-500 md:table-cell">
                         {row.unit}
                       </td>
-                      <td className="hidden px-4 py-3 text-slate-600 md:table-cell">
-                        {row.qty}
+                      <td className="hidden px-4 py-3 text-emerald-600 md:table-cell">
+                        {row.qtyIn || ""}
+                      </td>
+                      <td className="hidden px-4 py-3 text-rose-600 md:table-cell">
+                        {row.qtyOut || ""}
+                      </td>
+                      <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
+                        {row.balance ?? ""}
                       </td>
                       <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
                         {formatCurrency(row.price)}
                       </td>
                       <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
-                        {formatCurrency(row.qty * row.price)}
+                        {formatCurrency(row.total)}
                       </td>
-                      <td className="hidden px-4 py-3 text-slate-600 md:table-cell">
-                        {row.date}
+                      <td className="hidden px-4 py-3 text-slate-500 md:table-cell">
+                        {row.ref}
                       </td>
                       <td className="px-4 py-3 text-right md:hidden">
                         <button
                           type="button"
                           onClick={() =>
-                            setExpandedOutgoing((prev) => ({
+                            setExpandedTransactions((prev) => ({
                               ...prev,
                               [row.id]: !prev[row.id],
                             }))
                           }
                           className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600"
                         >
-                          {expandedOutgoing[row.id] ? "Hide" : "View"}
+                          {expandedTransactions[row.id] ? "Hide" : "View"}
                         </button>
                       </td>
                     </tr>
-                    {expandedOutgoing[row.id] && (
+                    {expandedTransactions[row.id] && (
                       <tr className="md:hidden">
-                        <td colSpan={8} className="px-4 pb-4">
+                        <td colSpan={13} className="px-4 pb-4">
                           <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-semibold uppercase text-slate-500">
+                                Category
+                              </span>
+                              <span>{row.category}</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-semibold uppercase text-slate-500">
+                                SKU
+                              </span>
+                              <span>{row.sku}</span>
+                            </div>
                             <div className="flex items-center justify-between">
                               <span className="text-xs font-semibold uppercase text-slate-500">
                                 UoM
@@ -1019,9 +1336,21 @@ export default function SettingsPage() {
                             </div>
                             <div className="flex items-center justify-between">
                               <span className="text-xs font-semibold uppercase text-slate-500">
-                                Qty
+                                In
                               </span>
-                              <span>{row.qty}</span>
+                              <span>{row.qtyIn || "-"}</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-semibold uppercase text-slate-500">
+                                Out
+                              </span>
+                              <span>{row.qtyOut || "-"}</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-semibold uppercase text-slate-500">
+                                Balance
+                              </span>
+                              <span>{row.balance ?? "-"}</span>
                             </div>
                             <div className="flex items-center justify-between">
                               <span className="text-xs font-semibold uppercase text-slate-500">
@@ -1033,13 +1362,13 @@ export default function SettingsPage() {
                               <span className="text-xs font-semibold uppercase text-slate-500">
                                 Total
                               </span>
-                              <span>{formatCurrency(row.qty * row.price)}</span>
+                              <span>{formatCurrency(row.total)}</span>
                             </div>
                             <div className="flex items-center justify-between">
                               <span className="text-xs font-semibold uppercase text-slate-500">
-                                Date
+                                Reference
                               </span>
-                              <span>{row.date}</span>
+                              <span>{row.ref}</span>
                             </div>
                           </div>
                         </td>
@@ -1050,6 +1379,14 @@ export default function SettingsPage() {
               </tbody>
             </table>
           </div>
+          <TablePagination
+            total={filteredTransactions.length}
+            page={txnPage}
+            pageSize={pageSize}
+            showAll={txnShowAll}
+            onPageChange={setTxnPage}
+            onToggleShowAll={() => setTxnShowAll((prev) => !prev)}
+          />
         </div>
       )}
 
@@ -1108,7 +1445,7 @@ export default function SettingsPage() {
                     </td>
                   </tr>
                 )}
-                {filteredLogs.map((row) => (
+                {pagedLogs.map((row) => (
                   <React.Fragment key={row.id}>
                     <tr className="hover:bg-slate-50">
                       <td className="px-4 py-3 text-slate-600">{row.date}</td>
@@ -1159,6 +1496,14 @@ export default function SettingsPage() {
               </tbody>
             </table>
           </div>
+          <TablePagination
+            total={filteredLogs.length}
+            page={logPage}
+            pageSize={pageSize}
+            showAll={logShowAll}
+            onPageChange={setLogPage}
+            onToggleShowAll={() => setLogShowAll((prev) => !prev)}
+          />
         </div>
       )}
 

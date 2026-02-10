@@ -9,12 +9,15 @@ import {
   doc,
   increment,
   onSnapshot,
+  orderBy,
+  query,
   updateDoc,
   writeBatch,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/components/AuthProvider";
 import MultiSelect from "@/components/MultiSelect";
+import TablePagination from "@/components/TablePagination";
 import { logAction } from "@/lib/logs";
 
 type ProductRow = {
@@ -158,6 +161,24 @@ const IncomingIcon = (
   </svg>
 );
 
+const OutgoingIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M4 7h16v10H4V7Z"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M12 20v-6m0 0 3 3m-3-3-3 3"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
 function Modal({
   title,
   open,
@@ -192,6 +213,7 @@ function Modal({
 
 export default function ProductsPage() {
   const { user, loading } = useAuth();
+  const pageSize = 10;
   const [productModalOpen, setProductModalOpen] = useState(false);
   const [categoryModalOpen, setCategoryModalOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -212,9 +234,27 @@ export default function ProductsPage() {
   const [incomingProduct, setIncomingProduct] = useState<ProductRow | null>(null);
   const [incomingQty, setIncomingQty] = useState("");
   const [incomingSource, setIncomingSource] = useState("Restock");
+  const [outgoingModalOpen, setOutgoingModalOpen] = useState(false);
+  const [outgoingProduct, setOutgoingProduct] = useState<ProductRow | null>(null);
+  const [outgoingQty, setOutgoingQty] = useState("");
+  const [outgoingDestination, setOutgoingDestination] = useState("Sale");
+  const [ledgerOpen, setLedgerOpen] = useState(false);
+  const [ledgerProduct, setLedgerProduct] = useState<ProductRow | null>(null);
+  const [ledgerEntries, setLedgerEntries] = useState<
+    Array<{
+      id: string;
+      type: string;
+      date: string;
+      qty: number;
+      direction: "in" | "out";
+      ref: string;
+    }>
+  >([]);
   const [error, setError] = useState<string | null>(null);
   const selectAllRef = useRef<HTMLInputElement>(null);
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+  const [productPage, setProductPage] = useState(1);
+  const [productShowAll, setProductShowAll] = useState(false);
 
   const hasActiveFilters =
     categoryFilter.length > 0 || productFilter.length > 0 || skuFilter.length > 0;
@@ -245,7 +285,13 @@ export default function ProductsPage() {
     [products, categoryFilter, productFilter, skuFilter],
   );
 
-  const visibleIds = filteredProducts.map((row) => row.id);
+  const pagedProducts = useMemo(() => {
+    if (productShowAll) return filteredProducts;
+    const start = (productPage - 1) * pageSize;
+    return filteredProducts.slice(start, start + pageSize);
+  }, [filteredProducts, productPage, productShowAll]);
+
+  const visibleIds = pagedProducts.map((row) => row.id);
   const allSelected =
     visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id));
   const someSelected =
@@ -285,6 +331,17 @@ export default function ProductsPage() {
       selectAllRef.current.indeterminate = Boolean(someSelected);
     }
   }, [someSelected]);
+
+  useEffect(() => {
+    setProductPage(1);
+  }, [filteredProducts.length]);
+
+  const clampQtyInput = (value: string) => {
+    if (!value.trim()) return "";
+    const next = Math.floor(Number(value));
+    if (Number.isNaN(next)) return "";
+    return String(Math.max(0, next));
+  };
 
   const toggleAll = () => {
     if (allSelected) {
@@ -328,6 +385,20 @@ export default function ProductsPage() {
     setIncomingSource("Restock");
     setError(null);
     setIncomingModalOpen(true);
+  };
+
+  const openOutgoing = (row: ProductRow) => {
+    setOutgoingProduct(row);
+    setOutgoingQty("");
+    setOutgoingDestination("Sale");
+    setError(null);
+    setOutgoingModalOpen(true);
+  };
+
+  const openLedger = (row: ProductRow) => {
+    setLedgerProduct(row);
+    setLedgerEntries([]);
+    setLedgerOpen(true);
   };
 
   const saveProduct = async () => {
@@ -429,6 +500,30 @@ export default function ProductsPage() {
     setIncomingModalOpen(false);
   };
 
+  const applyOutgoingStock = async () => {
+    if (!outgoingProduct) return;
+    const qty = Number(outgoingQty);
+    if (!Number.isInteger(qty) || qty <= 0) {
+      setError("Outgoing quantity must be a positive integer.");
+      return;
+    }
+    if (qty > outgoingProduct.onhandQty) {
+      setError("Outgoing quantity cannot exceed onhand quantity.");
+      return;
+    }
+    await updateDoc(doc(db, "products", outgoingProduct.id), {
+      onhandQty: increment(-qty),
+    });
+    await logAction(user, {
+      action: `Outgoing ${outgoingProduct.product}`,
+      entity: "product",
+      entityId: outgoingProduct.id,
+      entityName: outgoingProduct.product,
+      details: { qty, destination: outgoingDestination },
+    });
+    setOutgoingModalOpen(false);
+  };
+
   const saveCategory = async () => {
     const trimmedName = categoryName.trim();
     if (!trimmedName) {
@@ -448,6 +543,138 @@ export default function ProductsPage() {
       setError("Unable to save category. Please try again.");
     }
   };
+
+  useEffect(() => {
+    if (!ledgerOpen || !ledgerProduct) return;
+
+    const deliveriesRef = collection(db, "deliveries");
+    const deliveriesQuery = query(deliveriesRef, orderBy("drDate", "desc"));
+    const unsubscribeDeliveries = onSnapshot(deliveriesQuery, (snapshot) => {
+      const entries: Array<{
+        id: string;
+        type: string;
+        date: string;
+        qty: number;
+        direction: "in" | "out";
+        ref: string;
+      }> = [];
+
+      snapshot.docs.forEach((docSnap) => {
+        const data = docSnap.data() as {
+          status?: string;
+          drDate?: string;
+          drNo?: string;
+          items?: Array<{
+            productName?: string;
+            quantity?: number;
+          }>;
+        };
+        if (data.status !== "Closed") return;
+        data.items?.forEach((item, index) => {
+          if (item.productName !== ledgerProduct.product) return;
+          entries.push({
+            id: `${docSnap.id}-${index}`,
+            type: "Outgoing (Delivery)",
+            date: data.drDate ?? "",
+            qty: item.quantity ?? 0,
+            direction: "out",
+            ref: data.drNo ?? "",
+          });
+        });
+      });
+
+      setLedgerEntries((prev) => {
+        const byId = new Map(prev.map((entry) => [entry.id, entry]));
+        entries.forEach((entry) => byId.set(entry.id, entry));
+        return Array.from(byId.values()).sort((a, b) =>
+          b.date.localeCompare(a.date),
+        );
+      });
+    });
+
+    const logsRef = collection(db, "userLogs");
+    const logsQuery = query(logsRef, orderBy("createdAt", "desc"));
+    const unsubscribeLogs = onSnapshot(logsQuery, (snapshot) => {
+      const entries: Array<{
+        id: string;
+        type: string;
+        date: string;
+        qty: number;
+        direction: "in" | "out";
+        ref: string;
+      }> = [];
+      snapshot.docs.forEach((docSnap) => {
+        const data = docSnap.data() as {
+          entityId?: string;
+          action?: string;
+          createdAt?: { toDate: () => Date };
+          details?: { qty?: number; source?: string; destination?: string };
+        };
+        if (data.entityId !== ledgerProduct.id) return;
+        const createdAt = data.createdAt?.toDate?.();
+        const date = createdAt ? createdAt.toISOString().slice(0, 10) : "";
+        const qty = data.details?.qty ?? 0;
+        if (data.action?.startsWith("Restocked")) {
+          entries.push({
+            id: docSnap.id,
+            type: "Incoming (Restock)",
+            date,
+            qty,
+            direction: "in",
+            ref: data.details?.source ?? "Restock",
+          });
+        } else if (data.action?.startsWith("Returned")) {
+          entries.push({
+            id: docSnap.id,
+            type: "Incoming (Return)",
+            date,
+            qty,
+            direction: "in",
+            ref: data.details?.source ?? "Returns",
+          });
+        } else if (data.action?.startsWith("Outgoing")) {
+          entries.push({
+            id: docSnap.id,
+            type: "Outgoing",
+            date,
+            qty,
+            direction: "out",
+            ref: data.details?.destination ?? "",
+          });
+        }
+      });
+
+      setLedgerEntries((prev) => {
+        const byId = new Map(prev.map((entry) => [entry.id, entry]));
+        entries.forEach((entry) => byId.set(entry.id, entry));
+        return Array.from(byId.values()).sort((a, b) =>
+          b.date.localeCompare(a.date),
+        );
+      });
+    });
+
+    return () => {
+      unsubscribeDeliveries();
+      unsubscribeLogs();
+    };
+  }, [ledgerOpen, ledgerProduct]);
+
+  const ledgerRows = useMemo(() => {
+    if (!ledgerProduct) return [];
+    const sorted = [...ledgerEntries].sort((a, b) =>
+      a.date.localeCompare(b.date),
+    );
+    const netMovement = sorted.reduce(
+      (acc, entry) => acc + (entry.direction === "in" ? entry.qty : -entry.qty),
+      0,
+    );
+    let balance = (ledgerProduct.onhandQty ?? 0) - netMovement;
+    return sorted.map((entry) => {
+      const delta = entry.direction === "in" ? entry.qty : -entry.qty;
+      balance += delta;
+      return { entry, balance };
+    });
+  }, [ledgerEntries, ledgerProduct]);
 
   return (
     <section className="space-y-6">
@@ -608,7 +835,7 @@ export default function ProductsPage() {
                   </td>
                 </tr>
               )}
-              {filteredProducts.map((row) => (
+              {pagedProducts.map((row) => (
                 <React.Fragment key={row.id}>
                   <tr
                     className={`transition hover:bg-slate-50 ${
@@ -628,7 +855,15 @@ export default function ProductsPage() {
                     <td className="px-4 py-3 font-medium text-slate-700">
                       {row.category}
                     </td>
-                    <td className="px-4 py-3 text-slate-700">{row.product}</td>
+                    <td className="px-4 py-3 text-slate-700">
+                      <button
+                        type="button"
+                        onClick={() => openLedger(row)}
+                        className="cursor-pointer font-semibold text-blue-600 underline-offset-2 hover:underline"
+                      >
+                        {row.product}
+                      </button>
+                    </td>
                     <td className="px-4 py-3 text-slate-500">{row.sku}</td>
                     <td className="hidden px-4 py-3 text-slate-500 md:table-cell">
                       {row.unit}
@@ -678,6 +913,15 @@ export default function ProductsPage() {
                         title="Incoming Stocks"
                       >
                         {IncomingIcon}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openOutgoing(row)}
+                        className={`${iconButton} ml-2`}
+                        aria-label="Outgoing stocks"
+                        title="Outgoing"
+                      >
+                        {OutgoingIcon}
                       </button>
                     </td>
                     <td className="px-4 py-3 text-right md:hidden">
@@ -772,6 +1016,15 @@ export default function ProductsPage() {
                             >
                               {IncomingIcon}
                             </button>
+                            <button
+                              type="button"
+                              onClick={() => openOutgoing(row)}
+                              className={iconButton}
+                              aria-label="Outgoing stocks"
+                              title="Outgoing"
+                            >
+                              {OutgoingIcon}
+                            </button>
                           </div>
                         </div>
                       </td>
@@ -783,6 +1036,14 @@ export default function ProductsPage() {
           </table>
         </div>
       </div>
+      <TablePagination
+        total={filteredProducts.length}
+        page={productPage}
+        pageSize={pageSize}
+        showAll={productShowAll}
+        onPageChange={setProductPage}
+        onToggleShowAll={() => setProductShowAll((prev) => !prev)}
+      />
 
       <Modal
         title={editingProduct ? "Edit Product" : "New Product"}
@@ -870,9 +1131,10 @@ export default function ProductsPage() {
               onChange={(event) =>
                 setProductForm((prev) => ({
                   ...prev,
-                  quantity: event.target.value,
+                  quantity: clampQtyInput(event.target.value),
                 }))
               }
+              min={0}
               className={`mt-2 w-full rounded-xl border px-3 py-2 text-sm ${
                 editingProduct
                   ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-500"
@@ -966,7 +1228,8 @@ export default function ProductsPage() {
             <input
               type="number"
               value={incomingQty}
-              onChange={(event) => setIncomingQty(event.target.value)}
+              onChange={(event) => setIncomingQty(clampQtyInput(event.target.value))}
+              min={0}
               className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
             />
           </label>
@@ -1009,6 +1272,118 @@ export default function ProductsPage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      <Modal
+        title="Outgoing Stocks"
+        open={outgoingModalOpen}
+        onClose={() => setOutgoingModalOpen(false)}
+      >
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            applyOutgoingStock();
+          }}
+        >
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+            <p className="font-semibold text-slate-900">
+              {outgoingProduct?.product ?? "Selected product"}
+            </p>
+            <p className="text-xs text-slate-500">
+              Current Onhand: {outgoingProduct?.onhandQty ?? 0}
+            </p>
+          </div>
+          <label className="block text-sm font-medium text-slate-700">
+            QTY
+            <input
+              type="number"
+              value={outgoingQty}
+              onChange={(event) => setOutgoingQty(clampQtyInput(event.target.value))}
+              min={0}
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            />
+          </label>
+          <label className="block text-sm font-medium text-slate-700">
+            Destination
+            <select
+              value={outgoingDestination}
+              onChange={(event) => setOutgoingDestination(event.target.value)}
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            >
+              <option value="Sale">Sale</option>
+              <option value="Others">Others</option>
+            </select>
+          </label>
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+            <p className="font-semibold">How this affects quantities</p>
+            <p className="mt-1">Outgoing reduces Onhand quantity only.</p>
+          </div>
+          {error && (
+            <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+              {error}
+            </p>
+          )}
+          <div className="flex flex-wrap justify-end gap-3">
+            <button
+              type="button"
+              onClick={() => setOutgoingModalOpen(false)}
+              className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+            >
+              Save
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        title={`Product Card (${ledgerProduct?.product ?? ""})`}
+        open={ledgerOpen}
+        onClose={() => setLedgerOpen(false)}
+      >
+        <div className="space-y-3">
+          {ledgerEntries.length === 0 && (
+            <p className="text-sm text-slate-500">No ledger entries yet.</p>
+          )}
+          <div className="overflow-hidden rounded-xl border border-slate-200">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">Date</th>
+                  <th className="px-3 py-2">Type</th>
+                  <th className="px-3 py-2 text-right">In</th>
+                  <th className="px-3 py-2 text-right">Out</th>
+                  <th className="px-3 py-2 text-right">Balance</th>
+                  <th className="px-3 py-2">Reference</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {ledgerRows.map(({ entry, balance }) => (
+                  <tr key={entry.id}>
+                    <td className="px-3 py-2 text-slate-600">{entry.date}</td>
+                    <td className="px-3 py-2 text-slate-700">{entry.type}</td>
+                    <td className="px-3 py-2 text-right text-emerald-600">
+                      {entry.direction === "in" ? entry.qty : ""}
+                    </td>
+                    <td className="px-3 py-2 text-right text-rose-600">
+                      {entry.direction === "out" ? entry.qty : ""}
+                    </td>
+                    <td className="px-3 py-2 text-right text-slate-700">
+                      {balance}
+                    </td>
+                    <td className="px-3 py-2 text-slate-500">{entry.ref}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </Modal>
 
       <Modal

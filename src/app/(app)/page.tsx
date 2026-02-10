@@ -49,6 +49,7 @@ export default function DashboardPage() {
   const [deliveries, setDeliveries] = useState<DeliveryRow[]>([]);
   const [logs, setLogs] = useState<LogRow[]>([]);
   const [userType, setUserType] = useState<"admin" | "employee">("employee");
+  const [showAllActivity, setShowAllActivity] = useState(false);
 
   const lowStockThreshold = 10;
   const monthKey = new Date().toISOString().slice(0, 7);
@@ -96,7 +97,7 @@ export default function DashboardPage() {
       return;
     }
     const logsRef = collection(db, "userLogs");
-    const logsQuery = query(logsRef, orderBy("createdAt", "desc"), limit(8));
+    const logsQuery = query(logsRef, orderBy("createdAt", "desc"), limit(20));
     const unsubscribe = onSnapshot(logsQuery, (snapshot) => {
       const rows = snapshot.docs.map((docSnap) => {
         const data = docSnap.data() as Omit<LogRow, "id">;
@@ -152,6 +153,11 @@ export default function DashboardPage() {
       .sort((a, b) => b.drDate.localeCompare(a.drDate))
       .slice(0, 5);
   }, [deliveries]);
+
+  const activityRows = useMemo(() => {
+    if (showAllActivity) return logs;
+    return logs.slice(0, 5);
+  }, [logs, showAllActivity]);
 
   return (
     <section className="space-y-8">
@@ -334,7 +340,7 @@ export default function DashboardPage() {
                     No recent activity.
                   </p>
                 )}
-                {logs.map((row) => {
+                {activityRows.map((row) => {
                   const created = row.createdAt?.toDate?.();
                   const time = created
                     ? created.toLocaleTimeString("en-PH", {
@@ -356,6 +362,15 @@ export default function DashboardPage() {
                     </div>
                   );
                 })}
+                {logs.length > 5 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllActivity((prev) => !prev)}
+                    className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700"
+                  >
+                    {showAllActivity ? "Show less" : "Show more"}
+                  </button>
+                )}
               </div>
             </div>
           )}

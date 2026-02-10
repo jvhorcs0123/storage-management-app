@@ -11,6 +11,7 @@ import {
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/components/AuthProvider";
 import MultiSelect from "@/components/MultiSelect";
+import TablePagination from "@/components/TablePagination";
 
 type DeliveryRow = {
   id: string;
@@ -132,6 +133,7 @@ function Modal({
 
 export default function DeliveriesPage() {
   const { user, loading } = useAuth();
+  const pageSize = 10;
   const [deliveries, setDeliveries] = useState<DeliveryRow[]>([]);
   const [customerModalOpen, setCustomerModalOpen] = useState(false);
   const [customerForm, setCustomerForm] = useState<CustomerFormState>(emptyCustomer);
@@ -142,6 +144,8 @@ export default function DeliveriesPage() {
   const [customerFilter, setCustomerFilter] = useState<string[]>([]);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+  const [deliveryPage, setDeliveryPage] = useState(1);
+  const [deliveryShowAll, setDeliveryShowAll] = useState(false);
 
   const hasActiveFilters =
     Boolean(statusFilter) ||
@@ -176,6 +180,16 @@ export default function DeliveriesPage() {
       }),
     [deliveries, statusFilter, drDateFilter, drNoFilter, customerFilter],
   );
+
+  const pagedDeliveries = useMemo(() => {
+    if (deliveryShowAll) return filteredDeliveries;
+    const start = (deliveryPage - 1) * pageSize;
+    return filteredDeliveries.slice(start, start + pageSize);
+  }, [filteredDeliveries, deliveryPage, deliveryShowAll]);
+
+  useEffect(() => {
+    setDeliveryPage(1);
+  }, [filteredDeliveries.length]);
 
   useEffect(() => {
     if (!user) return;
@@ -343,7 +357,7 @@ export default function DeliveriesPage() {
                       </td>
                     </tr>
                   )}
-                  {filteredDeliveries.map((row) => (
+                  {pagedDeliveries.map((row) => (
                     <React.Fragment key={row.id}>
                       <tr className="hover:bg-slate-50">
                         <td
@@ -457,6 +471,14 @@ export default function DeliveriesPage() {
               </table>
             </div>
           </div>
+          <TablePagination
+            total={filteredDeliveries.length}
+            page={deliveryPage}
+            pageSize={pageSize}
+            showAll={deliveryShowAll}
+            onPageChange={setDeliveryPage}
+            onToggleShowAll={() => setDeliveryShowAll((prev) => !prev)}
+          />
 
           <Modal
             title="New Customer"

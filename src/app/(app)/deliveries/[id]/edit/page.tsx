@@ -114,6 +114,13 @@ export default function EditDeliveryPage() {
   const [confirmCloseOpen, setConfirmCloseOpen] = useState(false);
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
 
+  const clampQtyInput = (value: string) => {
+    if (!value.trim()) return "";
+    const next = Math.floor(Number(value));
+    if (Number.isNaN(next)) return "";
+    return String(Math.max(0, next));
+  };
+
   useEffect(() => {
     if (!user) return;
     const id = params?.id as string | undefined;
@@ -670,7 +677,8 @@ export default function EditDeliveryPage() {
                   <input
                     type="number"
                     value={itemQuantity}
-                    onChange={(event) => setItemQuantity(event.target.value)}
+                    onChange={(event) => setItemQuantity(clampQtyInput(event.target.value))}
+                    min={0}
                     className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
                   />
                 </label>

@@ -1,7 +1,7 @@
 "use client";
 
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
 import {
   addDoc,
   collection,
@@ -13,6 +13,7 @@ import {
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/components/AuthProvider";
 import { logAction } from "@/lib/logs";
+import TablePagination from "@/components/TablePagination";
 
 type CustomerRow = {
   id: string;
@@ -79,6 +80,7 @@ const TrashIcon = (
 
 export default function CustomersPage() {
   const { user, loading } = useAuth();
+  const pageSize = 10;
   const [customers, setCustomers] = useState<CustomerRow[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [customerModalOpen, setCustomerModalOpen] = useState(false);
@@ -94,9 +96,18 @@ export default function CustomersPage() {
   const [error, setError] = useState<string | null>(null);
   const selectAllRef = useRef<HTMLInputElement>(null);
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+  const [customerPage, setCustomerPage] = useState(1);
+  const [customerShowAll, setCustomerShowAll] = useState(false);
 
+  const pagedCustomers = useMemo(() => {
+    if (customerShowAll) return customers;
+    const start = (customerPage - 1) * pageSize;
+    return customers.slice(start, start + pageSize);
+  }, [customers, customerPage, customerShowAll]);
+
+  const visibleIds = pagedCustomers.map((row) => row.id);
   const allSelected =
-    customers.length > 0 && selectedIds.length === customers.length;
+    visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id));
   const someSelected = selectedIds.length > 0 && !allSelected;
 
   useEffect(() => {
@@ -119,12 +130,16 @@ export default function CustomersPage() {
     }
   }, [someSelected]);
 
+  useEffect(() => {
+    setCustomerPage(1);
+  }, [customers.length]);
+
   const toggleAll = () => {
     if (allSelected) {
-      setSelectedIds([]);
+      setSelectedIds((prev) => prev.filter((id) => !visibleIds.includes(id)));
       return;
     }
-    setSelectedIds(customers.map((row) => row.id));
+    setSelectedIds((prev) => Array.from(new Set([...prev, ...visibleIds])));
   };
 
   const toggleOne = (id: string) => {
@@ -303,10 +318,9 @@ export default function CustomersPage() {
                       </td>
                     </tr>
                   )}
-                  {customers.map((customer) => (
-                    <>
+                  {pagedCustomers.map((customer) => (
+                    <React.Fragment key={customer.id}>
                       <tr
-                        key={customer.id}
                         className={`transition hover:bg-slate-50 ${
                           selectedIds.includes(customer.id)
                             ? "bg-slate-50 ring-1 ring-inset ring-slate-200"
@@ -389,12 +403,20 @@ export default function CustomersPage() {
                           </td>
                         </tr>
                       )}
-                    </>
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>
             </div>
           </div>
+          <TablePagination
+            total={customers.length}
+            page={customerPage}
+            pageSize={pageSize}
+            showAll={customerShowAll}
+            onPageChange={setCustomerPage}
+            onToggleShowAll={() => setCustomerShowAll((prev) => !prev)}
+          />
 
           {customerModalOpen && (
             <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-3 sm:p-4 md:items-center md:p-6">

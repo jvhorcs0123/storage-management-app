@@ -1,7 +1,7 @@
 "use client";
 
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
 import {
   addDoc,
   collection,
@@ -13,6 +13,7 @@ import {
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/components/AuthProvider";
 import { logAction } from "@/lib/logs";
+import TablePagination from "@/components/TablePagination";
 
 type CategoryRow = {
   id: string;
@@ -77,6 +78,7 @@ const TrashIcon = (
 
 export default function CategoriesPage() {
   const { user, loading } = useAuth();
+  const pageSize = 10;
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [categoryModalOpen, setCategoryModalOpen] = useState(false);
   const [categories, setCategories] = useState<CategoryRow[]>([]);
@@ -88,9 +90,18 @@ export default function CategoriesPage() {
   const [error, setError] = useState<string | null>(null);
   const selectAllRef = useRef<HTMLInputElement>(null);
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+  const [categoryPage, setCategoryPage] = useState(1);
+  const [categoryShowAll, setCategoryShowAll] = useState(false);
 
+  const pagedCategories = useMemo(() => {
+    if (categoryShowAll) return categories;
+    const start = (categoryPage - 1) * pageSize;
+    return categories.slice(start, start + pageSize);
+  }, [categories, categoryPage, categoryShowAll]);
+
+  const visibleIds = pagedCategories.map((category) => category.id);
   const allSelected =
-    categories.length > 0 && selectedIds.length === categories.length;
+    visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id));
   const someSelected = selectedIds.length > 0 && !allSelected;
 
   useEffect(() => {
@@ -114,12 +125,16 @@ export default function CategoriesPage() {
     }
   }, [someSelected]);
 
+  useEffect(() => {
+    setCategoryPage(1);
+  }, [categories.length]);
+
   const toggleAll = () => {
     if (allSelected) {
-      setSelectedIds([]);
+      setSelectedIds((prev) => prev.filter((id) => !visibleIds.includes(id)));
       return;
     }
-    setSelectedIds(categories.map((category) => category.id));
+    setSelectedIds((prev) => Array.from(new Set([...prev, ...visibleIds])));
   };
 
   const toggleOne = (id: string) => {
@@ -289,10 +304,9 @@ export default function CategoriesPage() {
                   </td>
                 </tr>
               )}
-              {categories.map((category) => (
-                <>
+              {pagedCategories.map((category) => (
+                <React.Fragment key={category.id}>
                   <tr
-                    key={category.id}
                     className={`transition hover:bg-slate-50 ${
                       selectedIds.includes(category.id)
                         ? "bg-slate-50 ring-1 ring-inset ring-slate-200"
@@ -358,12 +372,20 @@ export default function CategoriesPage() {
                       </td>
                     </tr>
                   )}
-                </>
+                </React.Fragment>
               ))}
             </tbody>
           </table>
         </div>
       </div>
+      <TablePagination
+        total={categories.length}
+        page={categoryPage}
+        pageSize={pageSize}
+        showAll={categoryShowAll}
+        onPageChange={setCategoryPage}
+        onToggleShowAll={() => setCategoryShowAll((prev) => !prev)}
+      />
 
       {confirmDeleteOpen && (
         <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-3 sm:p-4 md:items-center md:p-6">
