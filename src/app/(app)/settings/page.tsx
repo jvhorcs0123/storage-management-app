@@ -9,6 +9,7 @@ import {
   limit,
   onSnapshot,
   orderBy,
+  QueryConstraint,
   query,
   setDoc,
   Timestamp,
@@ -266,7 +267,10 @@ export default function SettingsPage() {
     });
 
     const logsRef = collection(db, "userLogs");
-    const logConstraints = [orderBy("createdAt", "desc"), limit(500)];
+    const logConstraints: QueryConstraint[] = [
+      orderBy("createdAt", "desc"),
+      limit(500),
+    ];
     const fromTs = txnDateFilter.from
       ? Timestamp.fromDate(new Date(`${txnDateFilter.from}T00:00:00`))
       : null;
@@ -277,8 +281,8 @@ export default function SettingsPage() {
     if (toTs) logConstraints.push(where("createdAt", "<=", toTs));
     const logsQuery = query(logsRef, ...logConstraints);
     const unsubscribeLogs = onSnapshot(logsQuery, (snapshot) => {
-      const rows: TransactionRow[] = snapshot.docs
-        .map((docSnap) => {
+      const rows = snapshot.docs
+        .map((docSnap): TransactionRow | null => {
           const data = docSnap.data() as {
             action?: string;
             entityId?: string;
@@ -331,7 +335,7 @@ export default function SettingsPage() {
           }
           return null;
         })
-        .filter((row): row is TransactionRow => Boolean(row));
+        .filter((row): row is TransactionRow => row !== null);
 
       setTransactionRows((prev) => {
         const deliveryRows = prev.filter((row) => row.id.startsWith("delivery-"));
