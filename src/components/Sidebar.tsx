@@ -99,7 +99,7 @@ export default function Sidebar({
     () => [
       { label: "Homepage", href: "/", icon: HomeIcon },
       { label: "Products", href: "/products", icon: BoxIcon },
-      { label: "Deliveries", href: "/deliveries", icon: TruckIcon },
+      { label: "Outbound", href: "/deliveries", icon: TruckIcon },
       { label: "Settings", href: "/settings", icon: SettingsIcon },
     ],
     [],

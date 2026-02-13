@@ -6,13 +6,10 @@ import {
   doc,
   getDoc,
   getDocs,
-  limit,
   onSnapshot,
   orderBy,
-  QueryConstraint,
   query,
   setDoc,
-  Timestamp,
   where,
 } from "firebase/firestore";
 import {
@@ -39,8 +36,6 @@ type TransactionRow = {
   unit: string;
   qtyIn: number;
   qtyOut: number;
-  price: number;
-  total: number;
   date: string;
   ref: string;
   balance?: number;
@@ -68,13 +63,7 @@ type PendingRow = {
   date: string;
 };
 
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-PH", {
-    style: "currency",
-    currency: "PHP",
-    currencyDisplay: "narrowSymbol",
-  }).format(value);
-}
+type TransactionTypeFilter = "all" | "incoming" | "outgoing";
 
 export default function SettingsPage() {
   const { user } = useAuth();
@@ -84,25 +73,13 @@ export default function SettingsPage() {
     from: today,
     to: today,
   });
+  const [txnTypeFilter, setTxnTypeFilter] =
+    useState<TransactionTypeFilter>("all");
   const [logsDateFilter, setLogsDateFilter] = useState({
     from: today,
     to: today,
   });
   const [transactionRows, setTransactionRows] = useState<TransactionRow[]>([]);
-  const [productsMap, setProductsMap] = useState<
-    Record<
-      string,
-      {
-        id: string;
-        product: string;
-        category: string;
-        sku: string;
-        unit: string;
-        onhandQty: number;
-        unitPrice: number;
-      }
-    >
-  >({});
   const [logs, setLogs] = useState<LogRow[]>([]);
   const [expandedTransactions, setExpandedTransactions] = useState<
     Record<string, boolean>
@@ -175,179 +152,45 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (!user) return;
-    const productsRef = collection(db, "products");
-    const unsubscribe = onSnapshot(productsRef, (snapshot) => {
-      const map: Record<
-        string,
-        {
-          id: string;
-          product: string;
-          category: string;
-          sku: string;
-          unit: string;
-          onhandQty: number;
-          unitPrice: number;
-        }
-      > = {};
-      snapshot.docs.forEach((docSnap) => {
+    const transactionsRef = collection(db, "transactions");
+    const transactionsQuery = query(transactionsRef, orderBy("createdAt", "desc"));
+    const unsubscribe = onSnapshot(transactionsQuery, (snapshot) => {
+      const rows: TransactionRow[] = snapshot.docs.map((docSnap) => {
         const data = docSnap.data() as {
-          product?: string;
+          productId?: string;
+          productName?: string;
           category?: string;
           sku?: string;
           unit?: string;
-          onhandQty?: number;
-          unitPrice?: number;
+          type?: string;
+          qtyIn?: number;
+          qtyOut?: number;
+          date?: string;
+          reference?: string;
+          balanceAfter?: number | null;
+          createdAt?: { toDate: () => Date };
         };
-        if (!data.product) return;
-        map[data.product] = {
+        const createdAt = data.createdAt?.toDate?.();
+        return {
           id: docSnap.id,
-          product: data.product,
+          productId: data.productId ?? "",
+          type: data.type ?? "",
+          product: data.productName ?? "",
           category: data.category ?? "",
           sku: data.sku ?? "",
           unit: data.unit ?? "",
-          onhandQty: data.onhandQty ?? 0,
-          unitPrice: data.unitPrice ?? 0,
+          qtyIn: data.qtyIn ?? 0,
+          qtyOut: data.qtyOut ?? 0,
+          date: data.date ?? (createdAt ? createdAt.toISOString().slice(0, 10) : ""),
+          ref: data.reference ?? "",
+          balance:
+            typeof data.balanceAfter === "number" ? data.balanceAfter : undefined,
         };
       });
-      setProductsMap(map);
+      setTransactionRows(rows);
     });
     return () => unsubscribe();
   }, [user]);
-
-  useEffect(() => {
-    if (!user) return;
-    const deliveriesRef = collection(db, "deliveries");
-    const from = txnDateFilter.from;
-    const to = txnDateFilter.to;
-    const constraints = [where("status", "==", "Closed")];
-    if (from) constraints.push(where("drDate", ">=", from));
-    if (to) constraints.push(where("drDate", "<=", to));
-    const deliveriesQuery = query(deliveriesRef, ...constraints);
-    const unsubscribeDeliveries = onSnapshot(deliveriesQuery, (snapshot) => {
-      const rows: TransactionRow[] = [];
-      snapshot.docs.forEach((docSnap) => {
-        const data = docSnap.data() as {
-          drDate?: string;
-          drNo?: string;
-          items?: Array<{
-            productName?: string;
-            category?: string;
-            unit?: string;
-            price?: number;
-            quantity?: number;
-          }>;
-        };
-        const date = data.drDate ?? "";
-        data.items?.forEach((item, index) => {
-          const productName = item.productName ?? "Unknown";
-          const productInfo = productsMap[productName];
-          const qty = item.quantity ?? 0;
-          const price = item.price ?? productInfo?.unitPrice ?? 0;
-          rows.push({
-            id: `delivery-${docSnap.id}-${index}`,
-            productId: productInfo?.id,
-            type: "Outgoing (Delivery)",
-            product: productName,
-            category: item.category ?? productInfo?.category ?? "",
-            sku: productInfo?.sku ?? "",
-            unit: item.unit ?? productInfo?.unit ?? "",
-            qtyIn: 0,
-            qtyOut: qty,
-            price,
-            total: qty * price,
-            date,
-            ref: data.drNo ?? "",
-          });
-        });
-      });
-      setTransactionRows((prev) => {
-        const merged = rows.filter(Boolean);
-        return merged;
-      });
-    });
-
-    const logsRef = collection(db, "userLogs");
-    const logConstraints: QueryConstraint[] = [
-      orderBy("createdAt", "desc"),
-      limit(500),
-    ];
-    const fromTs = txnDateFilter.from
-      ? Timestamp.fromDate(new Date(`${txnDateFilter.from}T00:00:00`))
-      : null;
-    const toTs = txnDateFilter.to
-      ? Timestamp.fromDate(new Date(`${txnDateFilter.to}T23:59:59`))
-      : null;
-    if (fromTs) logConstraints.push(where("createdAt", ">=", fromTs));
-    if (toTs) logConstraints.push(where("createdAt", "<=", toTs));
-    const logsQuery = query(logsRef, ...logConstraints);
-    const unsubscribeLogs = onSnapshot(logsQuery, (snapshot) => {
-      const rows = snapshot.docs
-        .map((docSnap): TransactionRow | null => {
-          const data = docSnap.data() as {
-            action?: string;
-            entityId?: string;
-            entityName?: string;
-            createdAt?: { toDate: () => Date };
-            details?: { qty?: number; source?: string; destination?: string };
-          };
-          if (!data.action) return null;
-          const createdAt = data.createdAt?.toDate?.();
-          const date = createdAt ? createdAt.toISOString().slice(0, 10) : "";
-          const qty = data.details?.qty ?? 0;
-          const productName = data.entityName ?? "";
-          const productInfo = productsMap[productName];
-          const price = productInfo?.unitPrice ?? 0;
-          if (data.action.startsWith("Restocked") || data.action.startsWith("Returned")) {
-            return {
-              id: `log-${docSnap.id}`,
-              productId: data.entityId,
-              type: data.action.startsWith("Restocked")
-                ? "Incoming (Restock)"
-                : "Incoming (Return)",
-              product: productName,
-              category: productInfo?.category ?? "",
-              sku: productInfo?.sku ?? "",
-              unit: productInfo?.unit ?? "",
-              qtyIn: qty,
-              qtyOut: 0,
-              price,
-              total: qty * price,
-              date,
-              ref: data.details?.source ?? "",
-            };
-          }
-          if (data.action.startsWith("Outgoing")) {
-            return {
-              id: `log-${docSnap.id}`,
-              productId: data.entityId,
-              type: "Outgoing",
-              product: productName,
-              category: productInfo?.category ?? "",
-              sku: productInfo?.sku ?? "",
-              unit: productInfo?.unit ?? "",
-              qtyIn: 0,
-              qtyOut: qty,
-              price,
-              total: qty * price,
-              date,
-              ref: data.details?.destination ?? "",
-            };
-          }
-          return null;
-        })
-        .filter((row): row is TransactionRow => row !== null);
-
-      setTransactionRows((prev) => {
-        const deliveryRows = prev.filter((row) => row.id.startsWith("delivery-"));
-        return [...deliveryRows, ...rows];
-      });
-    });
-
-    return () => {
-      unsubscribeDeliveries();
-      unsubscribeLogs();
-    };
-  }, [user, txnDateFilter.from, txnDateFilter.to, productsMap]);
 
   useEffect(() => {
     if (!user) return;
@@ -434,31 +277,17 @@ export default function SettingsPage() {
   }, [user, profileUserType]);
 
   const filteredTransactions = useMemo(() => {
-    const grouped: Record<string, TransactionRow[]> = {};
-    transactionRows.forEach((row) => {
-      const key = row.productId ?? row.product;
-      grouped[key] = grouped[key] ? [...grouped[key], row] : [row];
+    const from = txnDateFilter.from;
+    const to = txnDateFilter.to;
+    const rows = transactionRows.filter((row) => {
+      if (from && row.date < from) return false;
+      if (to && row.date > to) return false;
+      if (txnTypeFilter === "incoming" && row.qtyIn <= 0) return false;
+      if (txnTypeFilter === "outgoing" && row.qtyOut <= 0) return false;
+      return true;
     });
-
-    const withBalance: TransactionRow[] = [];
-    Object.entries(grouped).forEach(([key, rows]) => {
-      const sorted = [...rows].sort((a, b) => a.date.localeCompare(b.date));
-      const productInfo = Object.values(productsMap).find(
-        (item) => item.id === key || item.product === key,
-      );
-      const netMovement = sorted.reduce(
-        (acc, row) => acc + row.qtyIn - row.qtyOut,
-        0,
-      );
-      let balance = (productInfo?.onhandQty ?? 0) - netMovement;
-      sorted.forEach((row) => {
-        balance += row.qtyIn - row.qtyOut;
-        withBalance.push({ ...row, balance });
-      });
-    });
-
-    return withBalance.sort((a, b) => b.date.localeCompare(a.date));
-  }, [transactionRows, productsMap]);
+    return rows.sort((a, b) => b.date.localeCompare(a.date));
+  }, [transactionRows, txnDateFilter.from, txnDateFilter.to, txnTypeFilter]);
 
   const filteredLogs = useMemo(
     () => {
@@ -685,8 +514,6 @@ export default function SettingsPage() {
       row.qtyIn ? String(row.qtyIn) : "",
       row.qtyOut ? String(row.qtyOut) : "",
       row.balance !== undefined ? String(row.balance) : "",
-      formatCurrency(row.price).replace(/[^0-9.,-]/g, ""),
-      formatCurrency(row.total).replace(/[^0-9.,-]/g, ""),
       row.ref,
     ]);
 
@@ -702,38 +529,12 @@ export default function SettingsPage() {
         "In",
         "Out",
         "Balance",
-        "Price",
-        "Total",
         "Reference",
       ]],
       body: rows,
       styles: { fontSize: 8 },
       headStyles: { fillColor: [15, 23, 42] },
     });
-
-    const totalIncomingValue = filteredTransactions.reduce(
-      (acc, row) => acc + (row.qtyIn ? row.total : 0),
-      0,
-    );
-    const totalOutgoingValue = filteredTransactions.reduce(
-      (acc, row) => acc + (row.qtyOut ? row.total : 0),
-      0,
-    );
-    const finalY = (docPdf as { lastAutoTable?: { finalY: number } })
-      .lastAutoTable?.finalY;
-    const summaryY = finalY ? finalY + 8 : 40;
-    docPdf.setFontSize(11);
-    docPdf.text(
-      `Total Incoming: ${formatCurrency(totalIncomingValue).replace(/[^0-9.,-]/g, "")}`,
-      14,
-      summaryY,
-    );
-    docPdf.text(
-      `Total Outgoing: ${formatCurrency(totalOutgoingValue).replace(/[^0-9.,-]/g, "")}`,
-      14,
-      summaryY + 8,
-    );
-    // Net is optional; keep only if needed in report.
 
     const blob = docPdf.output("blob");
     const url = URL.createObjectURL(blob);
@@ -1224,6 +1025,18 @@ export default function SettingsPage() {
                 }
                 className="rounded-xl border border-slate-200 px-3 py-2 text-sm"
               />
+              <span>Type</span>
+              <select
+                value={txnTypeFilter}
+                onChange={(event) =>
+                  setTxnTypeFilter(event.target.value as TransactionTypeFilter)
+                }
+                className="rounded-xl border border-slate-200 px-3 py-2 text-sm"
+              >
+                <option value="all">All</option>
+                <option value="incoming">Incoming</option>
+                <option value="outgoing">Outgoing</option>
+              </select>
               <button
                 type="button"
                 onClick={handleExportTransactionsPdf}
@@ -1251,8 +1064,6 @@ export default function SettingsPage() {
                   <th className="hidden px-4 py-3 md:table-cell">In</th>
                   <th className="hidden px-4 py-3 md:table-cell">Out</th>
                   <th className="hidden px-4 py-3 md:table-cell">Balance</th>
-                  <th className="hidden px-4 py-3 md:table-cell">Price</th>
-                  <th className="hidden px-4 py-3 md:table-cell">Total</th>
                   <th className="hidden px-4 py-3 md:table-cell">Reference</th>
                   <th className="px-4 py-3 text-right md:hidden">More</th>
                 </tr>
@@ -1261,7 +1072,7 @@ export default function SettingsPage() {
                 {filteredTransactions.length === 0 && (
                   <tr>
                     <td
-                      colSpan={13}
+                      colSpan={11}
                       className="px-4 py-6 text-center text-sm text-slate-500"
                     >
                       No transactions for this date range.
@@ -1292,12 +1103,6 @@ export default function SettingsPage() {
                       <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
                         {row.balance ?? ""}
                       </td>
-                      <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
-                        {formatCurrency(row.price)}
-                      </td>
-                      <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
-                        {formatCurrency(row.total)}
-                      </td>
                       <td className="hidden px-4 py-3 text-slate-500 md:table-cell">
                         {row.ref}
                       </td>
@@ -1318,7 +1123,7 @@ export default function SettingsPage() {
                     </tr>
                     {expandedTransactions[row.id] && (
                       <tr className="md:hidden">
-                        <td colSpan={13} className="px-4 pb-4">
+                        <td colSpan={11} className="px-4 pb-4">
                           <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
                             <div className="flex items-center justify-between">
                               <span className="text-xs font-semibold uppercase text-slate-500">
@@ -1355,18 +1160,6 @@ export default function SettingsPage() {
                                 Balance
                               </span>
                               <span>{row.balance ?? "-"}</span>
-                            </div>
-                            <div className="flex items-center justify-between">
-                              <span className="text-xs font-semibold uppercase text-slate-500">
-                                Price
-                              </span>
-                              <span>{formatCurrency(row.price)}</span>
-                            </div>
-                            <div className="flex items-center justify-between">
-                              <span className="text-xs font-semibold uppercase text-slate-500">
-                                Total
-                              </span>
-                              <span>{formatCurrency(row.total)}</span>
                             </div>
                             <div className="flex items-center justify-between">
                               <span className="text-xs font-semibold uppercase text-slate-500">

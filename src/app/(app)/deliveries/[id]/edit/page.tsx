@@ -2,24 +2,24 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { collection, doc, getDoc, getDocs, writeBatch } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  updateDoc,
+  writeBatch,
+} from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/components/AuthProvider";
 import { logAction } from "@/lib/logs";
-
-type CustomerRow = {
-  id: string;
-  name: string;
-  address: string;
-  contactNo: string;
-};
+import { addTransaction } from "@/lib/transactions";
 
 type ProductRow = {
   id: string;
   category: string;
   product: string;
   unit: string;
-  unitPrice: number;
   onhandQty: number;
 };
 
@@ -29,19 +29,17 @@ type DeliveryItem = {
   productName: string;
   category: string;
   unit: string;
-  price: number;
   quantity: number;
 };
 
 type DeliveryDoc = {
-  drNo: string;
-  drDate: string;
-  status: string;
-  customerId: string;
-  customerName: string;
-  address: string;
-  contactNo: string;
+  referenceNo: string;
+  outboundType: string;
+  receiver: string;
+  receiverName: string;
+  dateTime: string;
   items: DeliveryItem[];
+  status?: "Draft" | "Closed";
 };
 
 const iconBase = "h-4 w-4";
@@ -82,28 +80,21 @@ const TrashIcon = (
   </svg>
 );
 
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-PH", {
-    style: "currency",
-    currency: "PHP",
-    currencyDisplay: "narrowSymbol",
-  }).format(value);
-}
-
 export default function EditDeliveryPage() {
   const { user, loading } = useAuth();
   const params = useParams();
   const router = useRouter();
-  const [customers, setCustomers] = useState<CustomerRow[]>([]);
   const [products, setProducts] = useState<ProductRow[]>([]);
   const [deliveryItems, setDeliveryItems] = useState<DeliveryItem[]>([]);
   const [originalItems, setOriginalItems] = useState<DeliveryItem[]>([]);
-  const [drNo, setDrNo] = useState("");
-  const [deliveryDate, setDeliveryDate] = useState("");
-  const [status, setStatus] = useState("Open");
-  const [customerId, setCustomerId] = useState("");
-  const [address, setAddress] = useState("");
-  const [contactNo, setContactNo] = useState("");
+  const [originalStatus, setOriginalStatus] = useState<"Draft" | "Closed">(
+    "Draft",
+  );
+  const [referenceNo, setReferenceNo] = useState("");
+  const [outboundType, setOutboundType] = useState("Trucking");
+  const [receiver, setReceiver] = useState("Cashier");
+  const [receiverName, setReceiverName] = useState("");
+  const [dateTime, setDateTime] = useState("");
   const [itemModalOpen, setItemModalOpen] = useState(false);
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [itemProductId, setItemProductId] = useState("");
@@ -111,8 +102,8 @@ export default function EditDeliveryPage() {
   const [itemError, setItemError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
-  const [confirmCloseOpen, setConfirmCloseOpen] = useState(false);
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
+  const [showSaveHelp, setShowSaveHelp] = useState(false);
 
   const clampQtyInput = (value: string) => {
     if (!value.trim()) return "";
@@ -127,18 +118,10 @@ export default function EditDeliveryPage() {
     if (!id) return;
     const load = async () => {
       try {
-        const [customerSnap, productSnap, deliverySnap] = await Promise.all([
-          getDocs(collection(db, "customers")),
+        const [productSnap, deliverySnap] = await Promise.all([
           getDocs(collection(db, "products")),
           getDoc(doc(db, "deliveries", id)),
         ]);
-
-        const customerRows = customerSnap.docs.map((docSnap) => ({
-          id: docSnap.id,
-          ...(docSnap.data() as Omit<CustomerRow, "id">),
-        }));
-        customerRows.sort((a, b) => a.name.localeCompare(b.name));
-        setCustomers(customerRows);
 
         const productRows = productSnap.docs.map((docSnap) => ({
           id: docSnap.id,
@@ -148,35 +131,29 @@ export default function EditDeliveryPage() {
         setProducts(productRows);
 
         if (!deliverySnap.exists()) {
-          setPageError("Delivery record not found.");
+          setPageError("Outbound record not found.");
           return;
         }
         const delivery = deliverySnap.data() as DeliveryDoc;
-        setDrNo(delivery.drNo);
-        setDeliveryDate(delivery.drDate);
-        setStatus(delivery.status ?? "Open");
-        setCustomerId(delivery.customerId);
-        setAddress(delivery.address);
-        setContactNo(delivery.contactNo);
+        const status = delivery.status ?? "Closed";
+        if (status === "Closed") {
+          router.replace(`/deliveries/${id}`);
+          return;
+        }
+        setReferenceNo(delivery.referenceNo);
+        setOutboundType(delivery.outboundType ?? "Trucking");
+        setReceiver(delivery.receiver ?? "Cashier");
+        setReceiverName(delivery.receiverName ?? "");
+        setDateTime(delivery.dateTime ?? "");
         setDeliveryItems(delivery.items ?? []);
         setOriginalItems(delivery.items ?? []);
-        if (delivery.status === "Closed") {
-          router.replace(`/deliveries/${id}`);
-        }
+        setOriginalStatus(status);
       } catch {
-        setPageError("Unable to load delivery record.");
+        setPageError("Unable to load outbound record.");
       }
     };
     load();
-  }, [params, user, router]);
-
-  useEffect(() => {
-    const selected = customers.find((customer) => customer.id === customerId);
-    if (selected) {
-      setAddress(selected.address);
-      setContactNo(selected.contactNo);
-    }
-  }, [customerId, customers]);
+  }, [params, user]);
 
   const selectedProduct = useMemo(
     () => products.find((product) => product.id === itemProductId),
@@ -231,7 +208,6 @@ export default function EditDeliveryPage() {
       productName: selectedProduct.product,
       category: selectedProduct.category,
       unit: selectedProduct.unit,
-      price: selectedProduct.unitPrice,
       quantity: qty,
     };
 
@@ -243,7 +219,7 @@ export default function EditDeliveryPage() {
     });
     logAction(user, {
       action: `${editingItemId ? "Edited" : "Added"} ${nextItem.productName}`,
-      entity: "deliveryItem",
+      entity: "outboundItem",
       entityId: nextItem.productId,
       entityName: nextItem.productName,
     });
@@ -256,7 +232,7 @@ export default function EditDeliveryPage() {
       if (removed) {
         logAction(user, {
           action: `Deleted ${removed.productName}`,
-          entity: "deliveryItem",
+          entity: "outboundItem",
           entityId: removed.productId,
           entityName: removed.productName,
         });
@@ -265,19 +241,10 @@ export default function EditDeliveryPage() {
     });
   };
 
-  const subtotal = useMemo(
-    () =>
-      deliveryItems.reduce(
-        (total, item) => total + item.price * item.quantity,
-        0,
-      ),
-    [deliveryItems],
-  );
-
-  const saveDelivery = async () => {
+  const saveOutbound = async (status: "Draft" | "Closed") => {
     setFormError(null);
-    if (!drNo || !customerId || !deliveryDate) {
-      setFormError("DR No., customer, and delivery date are required.");
+    if (!referenceNo || !outboundType || !receiver || !receiverName || !dateTime) {
+      setFormError("Type, receiver, name, and date/time are required.");
       return;
     }
     if (deliveryItems.length === 0) {
@@ -285,58 +252,120 @@ export default function EditDeliveryPage() {
       return;
     }
 
-    const customer = customers.find((item) => item.id === customerId);
-    if (!customer) {
-      setFormError("Customer selection is invalid.");
-      return;
-    }
-
     const id = params?.id as string | undefined;
     if (!id) return;
 
-    const batch = writeBatch(db);
     const deliveryRef = doc(db, "deliveries", id);
-
-    const oldQtyMap = new Map<string, number>();
-    originalItems.forEach((item) => {
-      oldQtyMap.set(item.productId, (oldQtyMap.get(item.productId) ?? 0) + item.quantity);
-    });
-
-    const newQtyMap = new Map<string, number>();
-    deliveryItems.forEach((item) => {
-      newQtyMap.set(item.productId, (newQtyMap.get(item.productId) ?? 0) + item.quantity);
-    });
-
-    for (const product of products) {
-      const oldQty = oldQtyMap.get(product.id) ?? 0;
-      const newQty = newQtyMap.get(product.id) ?? 0;
-      if (oldQty === 0 && newQty === 0) continue;
-      const nextOnhand = product.onhandQty + oldQty - newQty;
-      if (nextOnhand < 0) {
-        setFormError(
-          `Insufficient onhand for ${product.product}. Adjust quantities.`,
-        );
-        return;
+    const movementEntries: Array<{
+      product: ProductRow;
+      qtyIn: number;
+      qtyOut: number;
+      balanceAfter: number;
+    }> = [];
+    if (status === "Closed") {
+      const batch = writeBatch(db);
+      const oldQtyMap = new Map<string, number>();
+      if (originalStatus === "Closed") {
+        originalItems.forEach((item) => {
+          oldQtyMap.set(
+            item.productId,
+            (oldQtyMap.get(item.productId) ?? 0) + item.quantity,
+          );
+        });
       }
-      batch.update(doc(db, "products", product.id), { onhandQty: nextOnhand });
+
+      const newQtyMap = new Map<string, number>();
+      deliveryItems.forEach((item) => {
+        newQtyMap.set(
+          item.productId,
+          (newQtyMap.get(item.productId) ?? 0) + item.quantity,
+        );
+      });
+
+      for (const product of products) {
+        const oldQty = oldQtyMap.get(product.id) ?? 0;
+        const newQty = newQtyMap.get(product.id) ?? 0;
+        if (oldQty === 0 && newQty === 0) continue;
+        const nextOnhand = product.onhandQty + oldQty - newQty;
+        if (nextOnhand < 0) {
+          setFormError(
+            `Insufficient onhand for ${product.product}. Adjust quantities.`,
+          );
+          return;
+        }
+        const delta = newQty - oldQty;
+        if (delta > 0) {
+          movementEntries.push({
+            product,
+            qtyIn: 0,
+            qtyOut: delta,
+            balanceAfter: nextOnhand,
+          });
+        } else if (delta < 0) {
+          movementEntries.push({
+            product,
+            qtyIn: Math.abs(delta),
+            qtyOut: 0,
+            balanceAfter: nextOnhand,
+          });
+        }
+        batch.update(doc(db, "products", product.id), { onhandQty: nextOnhand });
+      }
+
+      batch.update(deliveryRef, {
+        outboundType,
+        receiver,
+        receiverName,
+        dateTime,
+        items: deliveryItems,
+        status,
+      });
+
+      await batch.commit();
+      for (const entry of movementEntries) {
+        await addTransaction({
+          productId: entry.product.id,
+          productName: entry.product.product,
+          category: entry.product.category,
+          unit: entry.product.unit,
+          type:
+            entry.qtyOut > 0
+              ? `Outgoing (${outboundType} Edit)`
+              : "Incoming (Outbound Adjustment)",
+          qtyIn: entry.qtyIn,
+          qtyOut: entry.qtyOut,
+          balanceAfter: entry.balanceAfter,
+          reference: referenceNo,
+          destination: receiver,
+          source: entry.qtyIn > 0 ? "Outbound Adjustment" : "",
+          date: dateTime.slice(0, 10),
+          userId: user?.uid,
+          userName: user?.displayName ?? "",
+          userEmail: user?.email ?? "",
+        });
+      }
+      await logAction(user, {
+        action: `Edited ${referenceNo}`,
+        entity: "outbound",
+        entityId: id,
+        entityName: referenceNo,
+      });
+    } else {
+      await updateDoc(deliveryRef, {
+        outboundType,
+        receiver,
+        receiverName,
+        dateTime,
+        items: deliveryItems,
+        status,
+      });
+      await logAction(user, {
+        action: `Saved draft ${referenceNo}`,
+        entity: "outbound",
+        entityId: id,
+        entityName: referenceNo,
+      });
     }
-
-    batch.update(deliveryRef, {
-      drDate: deliveryDate,
-      customerId: customer.id,
-      customerName: customer.name,
-      address: customer.address,
-      contactNo: customer.contactNo,
-      items: deliveryItems,
-    });
-
-    await batch.commit();
-    await logAction(user, {
-      action: `Edited ${drNo}`,
-      entity: "delivery",
-      entityId: id,
-      entityName: drNo,
-    });
     router.push("/deliveries");
   };
 
@@ -351,7 +380,7 @@ export default function EditDeliveryPage() {
   if (!user) {
     return (
       <div className="rounded-2xl border border-slate-200 bg-white px-4 py-6 text-sm text-slate-600 shadow-sm">
-        Please sign in to edit deliveries.
+        Please sign in to edit outbound records.
       </div>
     );
   }
@@ -368,61 +397,63 @@ export default function EditDeliveryPage() {
     <section className="space-y-6">
       <div>
         <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-          Deliveries
+          Outbound
         </p>
-        <h1 className="text-2xl font-semibold text-slate-900">Edit DR</h1>
+        <h1 className="text-2xl font-semibold text-slate-900">Edit Outbound</h1>
       </div>
 
       <div className="grid gap-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:grid-cols-2">
         <label className="text-sm font-medium text-slate-700">
-          DR No.
+          Reference No.
           <input
             type="text"
-            value={drNo}
+            value={referenceNo}
             readOnly
             className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
           />
         </label>
         <label className="text-sm font-medium text-slate-700">
-          Delivery Date
+          Date & Time
           <input
-            type="date"
-            value={deliveryDate}
-            onChange={(event) => setDeliveryDate(event.target.value)}
+            type="datetime-local"
+            value={dateTime}
+            onChange={(event) => setDateTime(event.target.value)}
             className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
           />
         </label>
-        <label className="text-sm font-medium text-slate-700 md:col-span-2">
-          Customer Name
+        <label className="text-sm font-medium text-slate-700">
+          Type
           <select
-            value={customerId}
-            onChange={(event) => setCustomerId(event.target.value)}
+            value={outboundType}
+            onChange={(event) => setOutboundType(event.target.value)}
             className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
           >
-            <option value="">Select customer</option>
-            {customers.map((customer) => (
-              <option key={customer.id} value={customer.id}>
-                {customer.name}
-              </option>
-            ))}
+            <option value="Trucking">Trucking</option>
+            <option value="Display">Display</option>
+            <option value="Wholesale">Wholesale</option>
+            <option value="Jentech">Jentech</option>
+            <option value="Others">Others</option>
           </select>
         </label>
         <label className="text-sm font-medium text-slate-700">
-          Address
-          <input
-            type="text"
-            value={address}
-            readOnly
-            className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
-          />
+          Receiver
+          <select
+            value={receiver}
+            onChange={(event) => setReceiver(event.target.value)}
+            className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+          >
+            <option value="Cashier">Cashier</option>
+            <option value="Agent">Agent</option>
+            <option value="Others">Others</option>
+          </select>
         </label>
-        <label className="text-sm font-medium text-slate-700">
-          Contact No.
+        <label className="text-sm font-medium text-slate-700 md:col-span-2">
+          Receiver Name
           <input
             type="text"
-            value={contactNo}
-            readOnly
-            className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
+            value={receiverName}
+            onChange={(event) => setReceiverName(event.target.value)}
+            className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
           />
         </label>
       </div>
@@ -441,7 +472,6 @@ export default function EditDeliveryPage() {
                 <th className="px-4 py-3">Product</th>
                 <th className="hidden px-4 py-3 md:table-cell">Quantity</th>
                 <th className="hidden px-4 py-3 md:table-cell">UoM</th>
-                <th className="hidden px-4 py-3 md:table-cell">Price</th>
                 <th className="hidden px-4 py-3 md:table-cell">Actions</th>
                 <th className="px-4 py-3 text-right md:hidden">More</th>
               </tr>
@@ -450,7 +480,7 @@ export default function EditDeliveryPage() {
               {deliveryItems.length === 0 && (
                 <tr>
                   <td
-                    colSpan={7}
+                    colSpan={6}
                     className="px-4 py-6 text-center text-sm text-slate-500"
                   >
                     No items yet.
@@ -469,9 +499,6 @@ export default function EditDeliveryPage() {
                     </td>
                     <td className="hidden px-4 py-3 text-slate-600 md:table-cell">
                       {item.unit}
-                    </td>
-                    <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
-                      {formatCurrency(item.price)}
                     </td>
                     <td className="hidden px-4 py-3 md:table-cell">
                       <button
@@ -510,7 +537,7 @@ export default function EditDeliveryPage() {
                   </tr>
                   {expandedItems[item.id] && (
                     <tr className="md:hidden">
-                      <td colSpan={7} className="px-4 pb-4">
+                      <td colSpan={6} className="px-4 pb-4">
                         <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
                           <div className="flex items-center justify-between">
                             <span className="text-xs font-semibold uppercase text-slate-500">
@@ -523,12 +550,6 @@ export default function EditDeliveryPage() {
                               UoM
                             </span>
                             <span>{item.unit}</span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold uppercase text-slate-500">
-                              Price
-                            </span>
-                            <span>{formatCurrency(item.price)}</span>
                           </div>
                           <div className="flex items-center gap-2 pt-2">
                             <button
@@ -561,10 +582,6 @@ export default function EditDeliveryPage() {
         </div>
       </div>
 
-      <div className="flex justify-end rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm">
-        Subtotal:&nbsp;{formatCurrency(subtotal)}
-      </div>
-
       {formError && (
         <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
           {formError}
@@ -582,17 +599,26 @@ export default function EditDeliveryPage() {
         </button>
         <button
           type="button"
-          onClick={saveDelivery}
+          onClick={() => saveOutbound("Draft")}
+          className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+        >
+          Save as Draft
+        </button>
+        <button
+          type="button"
+          onClick={() => saveOutbound("Closed")}
           className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
         >
           Save
         </button>
         <button
           type="button"
-          onClick={() => setConfirmCloseOpen(true)}
-          className="rounded-xl border border-amber-200 px-4 py-2 text-sm font-semibold text-amber-700"
+          onClick={() => setShowSaveHelp((prev) => !prev)}
+          className="rounded-full border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-semibold text-sky-700 shadow-sm hover:border-sky-300 hover:text-sky-800"
+          aria-label="Explain save options"
+          title="Explain save options"
         >
-          Close
+          ?
         </button>
         <button
           type="button"
@@ -602,6 +628,19 @@ export default function EditDeliveryPage() {
           Cancel
         </button>
       </div>
+      {showSaveHelp && (
+        <div className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-700">
+          <p className="font-semibold text-sky-800">Save vs Save as Draft</p>
+          <p className="mt-1">
+            Save finalizes the outbound record, updates onhand quantity, and
+            locks it from further edits.
+          </p>
+          <p className="mt-1">
+            Save as Draft keeps it editable and does not affect stock or
+            transaction history until you save it.
+          </p>
+        </div>
+      )}
 
       {itemModalOpen && (
         <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-3 sm:p-4 md:items-center md:p-6">
@@ -660,19 +699,6 @@ export default function EditDeliveryPage() {
                   />
                 </label>
                 <label className="text-sm font-medium text-slate-700">
-                  Price
-                  <input
-                    type="text"
-                    readOnly
-                    value={
-                      selectedProduct
-                        ? formatCurrency(selectedProduct.unitPrice)
-                        : ""
-                    }
-                    className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
-                  />
-                </label>
-                <label className="text-sm font-medium text-slate-700">
                   Quantity
                   <input
                     type="number"
@@ -709,60 +735,6 @@ export default function EditDeliveryPage() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
-
-      {confirmCloseOpen && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-3 sm:p-4 md:items-center md:p-6">
-          <div className="w-[calc(100%-0.75rem)] max-w-lg rounded-2xl bg-white p-5 shadow-2xl sm:w-[calc(100%-2rem)] sm:p-6 md:max-h-[90vh] md:overflow-y-auto">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-4">
-              <h3 className="text-lg font-semibold text-slate-900">
-                Close DR
-              </h3>
-              <button
-                type="button"
-                onClick={() => setConfirmCloseOpen(false)}
-                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-500 transition hover:border-slate-400 hover:text-slate-700"
-              >
-                Close
-              </button>
-            </div>
-            <div className="space-y-4 pt-5 text-sm text-slate-700">
-              <p>
-                Mark this delivery as Closed? This transaction will become
-                read-only.
-              </p>
-              <div className="flex flex-wrap justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => setConfirmCloseOpen(false)}
-                  className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const id = params?.id as string | undefined;
-                    if (!id) return;
-                    await writeBatch(db)
-                      .update(doc(db, "deliveries", id), { status: "Closed" })
-                      .commit();
-                    await logAction(user, {
-                      action: `Closed ${drNo}`,
-                      entity: "delivery",
-                      entityId: id,
-                      entityName: drNo,
-                    });
-                    router.replace(`/deliveries/${id}`);
-                  }}
-                  className="rounded-xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white"
-                >
-                  Confirm Close
-                </button>
-              </div>
-            </div>
           </div>
         </div>
       )}

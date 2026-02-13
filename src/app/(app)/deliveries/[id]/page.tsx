@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
@@ -12,27 +12,18 @@ type DeliveryItem = {
   productName: string;
   category: string;
   unit: string;
-  price: number;
   quantity: number;
 };
 
 type DeliveryDoc = {
-  drNo: string;
-  drDate: string;
-  status: string;
-  customerName: string;
-  address: string;
-  contactNo: string;
+  referenceNo: string;
+  outboundType: string;
+  receiver: string;
+  receiverName: string;
+  dateTime: string;
   items: DeliveryItem[];
+  status?: "Draft" | "Closed";
 };
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-PH", {
-    style: "currency",
-    currency: "PHP",
-    currencyDisplay: "narrowSymbol",
-  }).format(value);
-}
 
 export default function DeliveryViewPage() {
   const { user, loading } = useAuth();
@@ -50,25 +41,16 @@ export default function DeliveryViewPage() {
       try {
         const snap = await getDoc(doc(db, "deliveries", id));
         if (!snap.exists()) {
-          setError("Delivery record not found.");
+          setError("Outbound record not found.");
           return;
         }
         setDelivery(snap.data() as DeliveryDoc);
       } catch {
-        setError("Unable to load delivery record.");
+        setError("Unable to load outbound record.");
       }
     };
     load();
   }, [params, user]);
-
-  const subtotal = useMemo(
-    () =>
-      delivery?.items?.reduce(
-        (total, item) => total + item.price * item.quantity,
-        0,
-      ) ?? 0,
-    [delivery],
-  );
 
   if (loading) {
     return (
@@ -81,7 +63,7 @@ export default function DeliveryViewPage() {
   if (!user) {
     return (
       <div className="rounded-2xl border border-slate-200 bg-white px-4 py-6 text-sm text-slate-600 shadow-sm">
-        Please sign in to view deliveries.
+        Please sign in to view outbound records.
       </div>
     );
   }
@@ -100,68 +82,64 @@ export default function DeliveryViewPage() {
 
   return (
     <section className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-            Deliveries
-          </p>
-          <h1 className="text-2xl font-semibold text-slate-900">View DR</h1>
-        </div>
-        <span
-          className={`text-sm font-semibold ${
-            delivery.status === "Open"
-              ? "text-emerald-600"
-              : delivery.status === "Closed"
-                ? "text-rose-600"
-                : "text-slate-600"
-          }`}
-        >
-          {delivery.status}
-        </span>
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+          Outbound
+        </p>
+        <h1 className="text-2xl font-semibold text-slate-900">View Outbound</h1>
       </div>
 
       <div className="grid gap-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:grid-cols-2">
         <label className="text-sm font-medium text-slate-700">
-          DR No.
+          Reference No.
           <input
             type="text"
-            value={delivery.drNo}
+            value={delivery.referenceNo}
             readOnly
             className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
           />
         </label>
         <label className="text-sm font-medium text-slate-700">
-          Delivery Date
+          Date & Time
           <input
             type="text"
-            value={delivery.drDate}
+            value={delivery.dateTime?.replace("T", " ")}
+            readOnly
+            className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
+          />
+        </label>
+        <label className="text-sm font-medium text-slate-700">
+          Status
+          <input
+            type="text"
+            value={delivery.status ?? "Closed"}
+            readOnly
+            className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
+          />
+        </label>
+        <label className="text-sm font-medium text-slate-700">
+          Type
+          <input
+            type="text"
+            value={delivery.outboundType}
+            readOnly
+            className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
+          />
+        </label>
+        <label className="text-sm font-medium text-slate-700">
+          Receiver
+          <input
+            type="text"
+            value={delivery.receiver}
             readOnly
             className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
           />
         </label>
         <label className="text-sm font-medium text-slate-700 md:col-span-2">
-          Customer Name
+          Receiver Name
           <input
             type="text"
-            value={delivery.customerName}
-            readOnly
-            className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
-          />
-        </label>
-        <label className="text-sm font-medium text-slate-700">
-          Address
-          <input
-            type="text"
-            value={delivery.address}
-            readOnly
-            className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
-          />
-        </label>
-        <label className="text-sm font-medium text-slate-700">
-          Contact No.
-          <input
-            type="text"
-            value={delivery.contactNo}
+            value={delivery.receiverName}
             readOnly
             className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
           />
@@ -182,7 +160,6 @@ export default function DeliveryViewPage() {
                 <th className="px-4 py-3">Product</th>
                 <th className="hidden px-4 py-3 md:table-cell">Quantity</th>
                 <th className="hidden px-4 py-3 md:table-cell">UoM</th>
-                <th className="hidden px-4 py-3 md:table-cell">Price</th>
                 <th className="px-4 py-3 text-right md:hidden">More</th>
               </tr>
             </thead>
@@ -190,7 +167,7 @@ export default function DeliveryViewPage() {
               {delivery.items?.length === 0 && (
                 <tr>
                   <td
-                    colSpan={6}
+                    colSpan={5}
                     className="px-4 py-6 text-center text-sm text-slate-500"
                   >
                     No items.
@@ -210,9 +187,6 @@ export default function DeliveryViewPage() {
                     <td className="hidden px-4 py-3 text-slate-600 md:table-cell">
                       {item.unit}
                     </td>
-                    <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
-                      {formatCurrency(item.price)}
-                    </td>
                     <td className="px-4 py-3 text-right md:hidden">
                       <button
                         type="button"
@@ -230,7 +204,7 @@ export default function DeliveryViewPage() {
                   </tr>
                   {expandedItems[item.id] && (
                     <tr className="md:hidden">
-                      <td colSpan={6} className="px-4 pb-4">
+                      <td colSpan={5} className="px-4 pb-4">
                         <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
                           <div className="flex items-center justify-between">
                             <span className="text-xs font-semibold uppercase text-slate-500">
@@ -244,12 +218,6 @@ export default function DeliveryViewPage() {
                             </span>
                             <span>{item.unit}</span>
                           </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold uppercase text-slate-500">
-                              Price
-                            </span>
-                            <span>{formatCurrency(item.price)}</span>
-                          </div>
                         </div>
                       </td>
                     </tr>
@@ -261,17 +229,13 @@ export default function DeliveryViewPage() {
         </div>
       </div>
 
-      <div className="flex justify-end rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm">
-        Subtotal:&nbsp;{formatCurrency(subtotal)}
-      </div>
-
       <div className="flex flex-wrap justify-end gap-3">
         <button
           type="button"
           onClick={() => router.push("/deliveries")}
           className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
         >
-          Back to Deliveries
+          Back to Outbound
         </button>
       </div>
     </section>

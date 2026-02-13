@@ -17,15 +17,14 @@ type ProductRow = {
   product: string;
   category: string;
   onhandQty: number;
-  unitPrice: number;
 };
 
 type DeliveryRow = {
   id: string;
-  status: string;
-  drDate: string;
-  drNo: string;
-  customerName: string;
+  referenceNo: string;
+  outboundType: string;
+  receiverName: string;
+  dateTime: string;
 };
 
 type LogRow = {
@@ -34,14 +33,6 @@ type LogRow = {
   userName: string;
   createdAt?: { toDate: () => Date };
 };
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-PH", {
-    style: "currency",
-    currency: "PHP",
-    currencyDisplay: "narrowSymbol",
-  }).format(value);
-}
 
 export default function DashboardPage() {
   const { user, loading } = useAuth();
@@ -112,28 +103,19 @@ export default function DashboardPage() {
   const lowStockCount = products.filter(
     (row) => (row.onhandQty ?? 0) <= lowStockThreshold,
   ).length;
-  const openDeliveries = deliveries.filter((row) => row.status === "Open")
-    .length;
-  const closedThisMonth = deliveries.filter(
-    (row) => row.status === "Closed" && row.drDate?.startsWith(monthKey),
+  const totalOutbound = deliveries.length;
+  const outboundThisMonth = deliveries.filter((row) =>
+    row.dateTime?.startsWith(monthKey),
   ).length;
 
-  const inventoryValue = useMemo(
-    () =>
-      products.reduce(
-        (acc, row) => acc + (row.onhandQty ?? 0) * (row.unitPrice ?? 0),
-        0,
-      ),
+  const totalOnhandUnits = useMemo(
+    () => products.reduce((acc, row) => acc + (row.onhandQty ?? 0), 0),
     [products],
   );
 
   const topProducts = useMemo(() => {
     return [...products]
-      .map((row) => ({
-        ...row,
-        value: (row.onhandQty ?? 0) * (row.unitPrice ?? 0),
-      }))
-      .sort((a, b) => b.value - a.value)
+      .sort((a, b) => (b.onhandQty ?? 0) - (a.onhandQty ?? 0))
       .slice(0, 5);
   }, [products]);
 
@@ -148,9 +130,9 @@ export default function DashboardPage() {
       .sort((a, b) => b.qty - a.qty);
   }, [products]);
 
-  const recentDeliveries = useMemo(() => {
+  const recentOutbound = useMemo(() => {
     return [...deliveries]
-      .sort((a, b) => b.drDate.localeCompare(a.drDate))
+      .sort((a, b) => (b.dateTime ?? "").localeCompare(a.dateTime ?? ""))
       .slice(0, 5);
   }, [deliveries]);
 
@@ -167,7 +149,7 @@ export default function DashboardPage() {
         </p>
         <h1 className="text-2xl font-semibold text-slate-900">Dashboard</h1>
         <p className="mt-2 text-sm text-slate-500">
-          Quick snapshot of inventory and deliveries.
+          Quick snapshot of inventory and outbound activity.
         </p>
       </div>
 
@@ -201,18 +183,18 @@ export default function DashboardPage() {
             </div>
             <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Open Deliveries
+                Total Outbound
               </p>
               <p className="mt-3 text-2xl font-semibold text-slate-900">
-                {openDeliveries}
+                {totalOutbound}
               </p>
             </div>
             <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Closed This Month
+                Outbound This Month
               </p>
               <p className="mt-3 text-2xl font-semibold text-slate-900">
-                {closedThisMonth}
+                {outboundThisMonth}
               </p>
             </div>
           </div>
@@ -222,48 +204,39 @@ export default function DashboardPage() {
               <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                 <div className="flex items-center justify-between">
                   <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">
-                    Inventory Value
+                    Total Onhand Units
                   </h2>
                   <span className="text-sm font-semibold text-slate-900">
-                    {formatCurrency(inventoryValue)}
+                    {totalOnhandUnits.toLocaleString()}
                   </span>
                 </div>
-                <p className="mt-2 text-xs text-slate-500">
-                  Based on onhand quantity x unit price.
-                </p>
               </div>
 
               <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                 <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">
-                  Recent Deliveries
+                  Recent Outbound
                 </h2>
                 <div className="mt-4 space-y-3">
-                  {recentDeliveries.length === 0 && (
+                  {recentOutbound.length === 0 && (
                     <p className="text-sm text-slate-500">
-                      No deliveries yet.
+                      No outbound records yet.
                     </p>
                   )}
-                  {recentDeliveries.map((row) => (
+                  {recentOutbound.map((row) => (
                     <div
                       key={row.id}
                       className="flex items-center justify-between rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-700"
                     >
                       <div>
                         <p className="font-semibold text-slate-900">
-                          {row.drNo}
+                          {row.referenceNo}
                         </p>
                         <p className="text-xs text-slate-500">
-                          {row.customerName} · {row.drDate}
+                          {row.receiverName} - {row.dateTime?.replace("T", " ")}
                         </p>
                       </div>
-                      <span
-                        className={`text-xs font-semibold ${
-                          row.status === "Open"
-                            ? "text-emerald-600"
-                            : "text-rose-600"
-                        }`}
-                      >
-                        {row.status}
+                      <span className="text-xs font-semibold text-slate-600">
+                        {row.outboundType}
                       </span>
                     </div>
                   ))}
@@ -274,7 +247,7 @@ export default function DashboardPage() {
             <div className="space-y-6">
               <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                 <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">
-                  Top Products (Onhand Value)
+                  Top Products (Onhand Qty)
                 </h2>
                 <div className="mt-4 space-y-3">
                   {topProducts.length === 0 && (
@@ -290,11 +263,11 @@ export default function DashboardPage() {
                           {row.product}
                         </p>
                         <p className="text-xs text-slate-500">
-                          {row.category} · {row.onhandQty ?? 0} onhand
+                          {row.category} - {row.onhandQty ?? 0} onhand
                         </p>
                       </div>
                       <span className="text-xs font-semibold text-slate-900">
-                        {formatCurrency(row.value)}
+                        {row.onhandQty?.toLocaleString() ?? 0}
                       </span>
                     </div>
                   ))}
@@ -357,7 +330,7 @@ export default function DashboardPage() {
                         {row.action}
                       </p>
                       <p className="text-xs text-slate-500">
-                        {row.userName || "User"} {time && `· ${time}`}
+                        {row.userName || "User"} {time && `- ${time}`}
                       </p>
                     </div>
                   );
@@ -379,3 +352,4 @@ export default function DashboardPage() {
     </section>
   );
 }
+

@@ -3,15 +3,18 @@
 import React from "react";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import {
   addDoc,
   collection,
   doc,
+  getDocs,
   increment,
   onSnapshot,
-  orderBy,
   query,
   updateDoc,
+  where,
   writeBatch,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
@@ -19,6 +22,7 @@ import { useAuth } from "@/components/AuthProvider";
 import MultiSelect from "@/components/MultiSelect";
 import TablePagination from "@/components/TablePagination";
 import { logAction } from "@/lib/logs";
+import { addTransaction } from "@/lib/transactions";
 
 type ProductRow = {
   id: string;
@@ -28,7 +32,6 @@ type ProductRow = {
   unit: string;
   totalQty: number;
   onhandQty: number;
-  unitPrice: number;
   notes?: string;
 };
 
@@ -43,7 +46,6 @@ type ProductFormState = {
   sku: string;
   unit: string;
   quantity: string;
-  unitPrice: string;
   notes: string;
 };
 
@@ -53,17 +55,8 @@ const emptyProductForm: ProductFormState = {
   sku: "",
   unit: "",
   quantity: "",
-  unitPrice: "",
   notes: "",
 };
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-PH", {
-    style: "currency",
-    currency: "PHP",
-    currencyDisplay: "narrowSymbol",
-  }).format(value);
-}
 
 const iconBase = "h-4 w-4";
 const iconButton =
@@ -161,20 +154,36 @@ const IncomingIcon = (
   </svg>
 );
 
-const OutgoingIcon = (
+const LedgerIcon = (
   <svg viewBox="0 0 24 24" className={iconBase} fill="none">
     <path
-      d="M4 7h16v10H4V7Z"
+      d="M6 4h9l3 3v13H6V4Z"
       stroke="currentColor"
       strokeWidth="1.6"
       strokeLinejoin="round"
     />
     <path
-      d="M12 20v-6m0 0 3 3m-3-3-3 3"
+      d="M8 12h8M8 16h6"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
+const PdfIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M6 3h9l4 4v14H6V3Z"
       stroke="currentColor"
       strokeWidth="1.6"
-      strokeLinecap="round"
       strokeLinejoin="round"
+    />
+    <path
+      d="M9 11h6M9 15h6"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
     />
   </svg>
 );
@@ -245,12 +254,16 @@ export default function ProductsPage() {
       id: string;
       type: string;
       date: string;
-      qty: number;
-      direction: "in" | "out";
+      qtyIn: number;
+      qtyOut: number;
+      balance?: number;
       ref: string;
     }>
   >([]);
-  const [error, setError] = useState<string | null>(null);
+  const [productError, setProductError] = useState<string | null>(null);
+  const [categoryError, setCategoryError] = useState<string | null>(null);
+  const [incomingError, setIncomingError] = useState<string | null>(null);
+  const [outgoingError, setOutgoingError] = useState<string | null>(null);
   const selectAllRef = useRef<HTMLInputElement>(null);
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
   const [productPage, setProductPage] = useState(1);
@@ -358,14 +371,20 @@ export default function ProductsPage() {
   };
 
   const openNewProduct = () => {
-    setError(null);
+    setProductError(null);
+    setCategoryError(null);
+    setIncomingError(null);
+    setOutgoingError(null);
     setEditingProduct(null);
     setProductForm(emptyProductForm);
     setProductModalOpen(true);
   };
 
   const openEditProduct = (row: ProductRow) => {
-    setError(null);
+    setProductError(null);
+    setCategoryError(null);
+    setIncomingError(null);
+    setOutgoingError(null);
     setEditingProduct(row);
     setProductForm({
       product: row.product,
@@ -373,7 +392,6 @@ export default function ProductsPage() {
       sku: row.sku,
       unit: row.unit,
       quantity: String(row.totalQty),
-      unitPrice: String(row.unitPrice),
       notes: row.notes ?? "",
     });
     setProductModalOpen(true);
@@ -383,7 +401,10 @@ export default function ProductsPage() {
     setIncomingProduct(row);
     setIncomingQty("");
     setIncomingSource("Restock");
-    setError(null);
+    setIncomingError(null);
+    setProductError(null);
+    setCategoryError(null);
+    setOutgoingError(null);
     setIncomingModalOpen(true);
   };
 
@@ -391,7 +412,10 @@ export default function ProductsPage() {
     setOutgoingProduct(row);
     setOutgoingQty("");
     setOutgoingDestination("Sale");
-    setError(null);
+    setOutgoingError(null);
+    setProductError(null);
+    setCategoryError(null);
+    setIncomingError(null);
     setOutgoingModalOpen(true);
   };
 
@@ -401,22 +425,87 @@ export default function ProductsPage() {
     setLedgerOpen(true);
   };
 
+  const handleStockCardPdf = async (row: ProductRow) => {
+    const transactionsRef = collection(db, "transactions");
+    const transactionsQuery = query(
+      transactionsRef,
+      where("productId", "==", row.id),
+    );
+    const snapshot = await getDocs(transactionsQuery);
+    const entries = snapshot.docs.map((docSnap) => {
+      const data = docSnap.data() as {
+        type?: string;
+        date?: string;
+        qtyIn?: number;
+        qtyOut?: number;
+        balanceAfter?: number;
+        reference?: string;
+      };
+      return {
+        id: docSnap.id,
+        type: data.type ?? "",
+        date: data.date ?? "",
+        qtyIn: data.qtyIn ?? 0,
+        qtyOut: data.qtyOut ?? 0,
+        balance: data.balanceAfter,
+        ref: data.reference ?? "",
+      };
+    });
+    entries.sort((a, b) => b.date.localeCompare(a.date));
+
+    const docPdf = new jsPDF({ orientation: "portrait" });
+    const now = new Date();
+    docPdf.setFontSize(14);
+    docPdf.text(`Stock Card - ${row.product}`, 14, 18);
+    docPdf.setFontSize(10);
+    docPdf.text(
+      `Generated: ${now.toLocaleDateString("en-PH")} ${now.toLocaleTimeString("en-PH")}`,
+      14,
+      26,
+    );
+    docPdf.text(`Category: ${row.category}`, 14, 32);
+    docPdf.text(`SKU: ${row.sku || "-"}`, 14, 38);
+    docPdf.text(`UoM: ${row.unit}`, 14, 44);
+    docPdf.text(`Total Qty: ${row.totalQty}`, 14, 50);
+    docPdf.text(`Onhand Qty: ${row.onhandQty}`, 14, 56);
+
+    const rows = entries.map((entry) => [
+      entry.date,
+      entry.type,
+      entry.qtyIn ? String(entry.qtyIn) : "",
+      entry.qtyOut ? String(entry.qtyOut) : "",
+      entry.balance !== undefined ? String(entry.balance) : "",
+      entry.ref,
+    ]);
+
+    autoTable(docPdf, {
+      startY: 64,
+      head: [["Date", "Type", "In", "Out", "Balance", "Reference"]],
+      body: rows,
+      styles: { fontSize: 8 },
+      headStyles: { fillColor: [15, 23, 42] },
+    });
+
+    const blob = docPdf.output("blob");
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank", "noopener,noreferrer");
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  };
+
   const saveProduct = async () => {
-    setError(null);
+    setProductError(null);
     const trimmedProduct = productForm.product.trim();
     const trimmedCategory = productForm.category.trim();
     const trimmedSku = productForm.sku.trim();
     const trimmedUnit = productForm.unit.trim();
     const quantity = Number(productForm.quantity);
-    const unitPrice = Number(productForm.unitPrice);
-
     if (!trimmedProduct || !trimmedCategory || !trimmedUnit) {
-      setError("Product name, category, and unit are required.");
+      setProductError("Product name, category, and unit are required.");
       return;
     }
 
-    if (Number.isNaN(quantity) || Number.isNaN(unitPrice)) {
-      setError("Quantity and unit price must be valid numbers.");
+    if (Number.isNaN(quantity)) {
+      setProductError("Quantity must be a valid number.");
       return;
     }
 
@@ -427,7 +516,6 @@ export default function ProductsPage() {
       unit: trimmedUnit,
       totalQty: quantity,
       onhandQty: editingProduct ? editingProduct.onhandQty : quantity,
-      unitPrice,
       notes: productForm.notes.trim(),
     };
 
@@ -442,6 +530,22 @@ export default function ProductsPage() {
         });
       } else {
         const created = await addDoc(collection(db, "products"), payload);
+        await addTransaction({
+          productId: created.id,
+          productName: payload.product,
+          category: payload.category,
+          sku: payload.sku,
+          unit: payload.unit,
+          type: "Incoming (Initial Stock)",
+          qtyIn: payload.onhandQty,
+          qtyOut: 0,
+          balanceAfter: payload.onhandQty,
+          reference: "Initial Stock",
+          source: "Initial Stock",
+          userId: user?.uid,
+          userName: user?.displayName ?? "",
+          userEmail: user?.email ?? "",
+        });
         await logAction(user, {
           action: `Added ${payload.product}`,
           entity: "product",
@@ -453,7 +557,7 @@ export default function ProductsPage() {
       setProductForm(emptyProductForm);
       setEditingProduct(null);
     } catch {
-      setError("Unable to save product. Please try again.");
+      setProductError("Unable to save product. Please try again.");
     }
   };
 
@@ -476,10 +580,11 @@ export default function ProductsPage() {
   };
 
   const applyIncomingStock = async () => {
+    setIncomingError(null);
     if (!incomingProduct) return;
     const qty = Number(incomingQty);
     if (!Number.isInteger(qty) || qty <= 0) {
-      setError("Incoming quantity must be a positive integer.");
+      setIncomingError("Incoming quantity must be a positive integer.");
       return;
     }
     const updates =
@@ -487,6 +592,25 @@ export default function ProductsPage() {
         ? { totalQty: increment(qty), onhandQty: increment(qty) }
         : { onhandQty: increment(qty) };
     await updateDoc(doc(db, "products", incomingProduct.id), updates);
+    await addTransaction({
+      productId: incomingProduct.id,
+      productName: incomingProduct.product,
+      category: incomingProduct.category,
+      sku: incomingProduct.sku,
+      unit: incomingProduct.unit,
+      type:
+        incomingSource === "Restock"
+          ? "Incoming (Restock)"
+          : "Incoming (Return)",
+      qtyIn: qty,
+      qtyOut: 0,
+      balanceAfter: incomingProduct.onhandQty + qty,
+      reference: incomingSource,
+      source: incomingSource,
+      userId: user?.uid,
+      userName: user?.displayName ?? "",
+      userEmail: user?.email ?? "",
+    });
     await logAction(user, {
       action:
         incomingSource === "Restock"
@@ -501,18 +625,35 @@ export default function ProductsPage() {
   };
 
   const applyOutgoingStock = async () => {
+    setOutgoingError(null);
     if (!outgoingProduct) return;
     const qty = Number(outgoingQty);
     if (!Number.isInteger(qty) || qty <= 0) {
-      setError("Outgoing quantity must be a positive integer.");
+      setOutgoingError("Outgoing quantity must be a positive integer.");
       return;
     }
     if (qty > outgoingProduct.onhandQty) {
-      setError("Outgoing quantity cannot exceed onhand quantity.");
+      setOutgoingError("Outgoing quantity cannot exceed onhand quantity.");
       return;
     }
     await updateDoc(doc(db, "products", outgoingProduct.id), {
       onhandQty: increment(-qty),
+    });
+    await addTransaction({
+      productId: outgoingProduct.id,
+      productName: outgoingProduct.product,
+      category: outgoingProduct.category,
+      sku: outgoingProduct.sku,
+      unit: outgoingProduct.unit,
+      type: "Outgoing",
+      qtyIn: 0,
+      qtyOut: qty,
+      balanceAfter: outgoingProduct.onhandQty - qty,
+      reference: outgoingDestination,
+      destination: outgoingDestination,
+      userId: user?.uid,
+      userName: user?.displayName ?? "",
+      userEmail: user?.email ?? "",
     });
     await logAction(user, {
       action: `Outgoing ${outgoingProduct.product}`,
@@ -525,9 +666,10 @@ export default function ProductsPage() {
   };
 
   const saveCategory = async () => {
+    setCategoryError(null);
     const trimmedName = categoryName.trim();
     if (!trimmedName) {
-      setError("Category name is required.");
+      setCategoryError("Category name is required.");
       return;
     }
     try {
@@ -540,141 +682,57 @@ export default function ProductsPage() {
       setCategoryName("");
       setCategoryModalOpen(false);
     } catch {
-      setError("Unable to save category. Please try again.");
+      setCategoryError("Unable to save category. Please try again.");
     }
   };
 
   useEffect(() => {
     if (!ledgerOpen || !ledgerProduct) return;
 
-    const deliveriesRef = collection(db, "deliveries");
-    const deliveriesQuery = query(deliveriesRef, orderBy("drDate", "desc"));
-    const unsubscribeDeliveries = onSnapshot(deliveriesQuery, (snapshot) => {
+    const transactionsRef = collection(db, "transactions");
+    const transactionsQuery = query(
+      transactionsRef,
+      where("productId", "==", ledgerProduct.id),
+    );
+    const unsubscribe = onSnapshot(transactionsQuery, (snapshot) => {
       const entries: Array<{
         id: string;
         type: string;
         date: string;
-        qty: number;
-        direction: "in" | "out";
+        qtyIn: number;
+        qtyOut: number;
+        balance?: number;
         ref: string;
       }> = [];
-
       snapshot.docs.forEach((docSnap) => {
         const data = docSnap.data() as {
-          status?: string;
-          drDate?: string;
-          drNo?: string;
-          items?: Array<{
-            productName?: string;
-            quantity?: number;
-          }>;
+          type?: string;
+          date?: string;
+          qtyIn?: number;
+          qtyOut?: number;
+          balanceAfter?: number;
+          reference?: string;
         };
-        if (data.status !== "Closed") return;
-        data.items?.forEach((item, index) => {
-          if (item.productName !== ledgerProduct.product) return;
-          entries.push({
-            id: `${docSnap.id}-${index}`,
-            type: "Outgoing (Delivery)",
-            date: data.drDate ?? "",
-            qty: item.quantity ?? 0,
-            direction: "out",
-            ref: data.drNo ?? "",
-          });
+        entries.push({
+          id: docSnap.id,
+          type: data.type ?? "",
+          date: data.date ?? "",
+          qtyIn: data.qtyIn ?? 0,
+          qtyOut: data.qtyOut ?? 0,
+          balance: data.balanceAfter,
+          ref: data.reference ?? "",
         });
       });
 
-      setLedgerEntries((prev) => {
-        const byId = new Map(prev.map((entry) => [entry.id, entry]));
-        entries.forEach((entry) => byId.set(entry.id, entry));
-        return Array.from(byId.values()).sort((a, b) =>
-          b.date.localeCompare(a.date),
-        );
-      });
+      setLedgerEntries(entries);
     });
 
-    const logsRef = collection(db, "userLogs");
-    const logsQuery = query(logsRef, orderBy("createdAt", "desc"));
-    const unsubscribeLogs = onSnapshot(logsQuery, (snapshot) => {
-      const entries: Array<{
-        id: string;
-        type: string;
-        date: string;
-        qty: number;
-        direction: "in" | "out";
-        ref: string;
-      }> = [];
-      snapshot.docs.forEach((docSnap) => {
-        const data = docSnap.data() as {
-          entityId?: string;
-          action?: string;
-          createdAt?: { toDate: () => Date };
-          details?: { qty?: number; source?: string; destination?: string };
-        };
-        if (data.entityId !== ledgerProduct.id) return;
-        const createdAt = data.createdAt?.toDate?.();
-        const date = createdAt ? createdAt.toISOString().slice(0, 10) : "";
-        const qty = data.details?.qty ?? 0;
-        if (data.action?.startsWith("Restocked")) {
-          entries.push({
-            id: docSnap.id,
-            type: "Incoming (Restock)",
-            date,
-            qty,
-            direction: "in",
-            ref: data.details?.source ?? "Restock",
-          });
-        } else if (data.action?.startsWith("Returned")) {
-          entries.push({
-            id: docSnap.id,
-            type: "Incoming (Return)",
-            date,
-            qty,
-            direction: "in",
-            ref: data.details?.source ?? "Returns",
-          });
-        } else if (data.action?.startsWith("Outgoing")) {
-          entries.push({
-            id: docSnap.id,
-            type: "Outgoing",
-            date,
-            qty,
-            direction: "out",
-            ref: data.details?.destination ?? "",
-          });
-        }
-      });
-
-      setLedgerEntries((prev) => {
-        const byId = new Map(prev.map((entry) => [entry.id, entry]));
-        entries.forEach((entry) => byId.set(entry.id, entry));
-        return Array.from(byId.values()).sort((a, b) =>
-          b.date.localeCompare(a.date),
-        );
-      });
-    });
-
-    return () => {
-      unsubscribeDeliveries();
-      unsubscribeLogs();
-    };
+    return () => unsubscribe();
   }, [ledgerOpen, ledgerProduct]);
 
   const ledgerRows = useMemo(() => {
-    if (!ledgerProduct) return [];
-    const sorted = [...ledgerEntries].sort((a, b) =>
-      a.date.localeCompare(b.date),
-    );
-    const netMovement = sorted.reduce(
-      (acc, entry) => acc + (entry.direction === "in" ? entry.qty : -entry.qty),
-      0,
-    );
-    let balance = (ledgerProduct.onhandQty ?? 0) - netMovement;
-    return sorted.map((entry) => {
-      const delta = entry.direction === "in" ? entry.qty : -entry.qty;
-      balance += delta;
-      return { entry, balance };
-    });
-  }, [ledgerEntries, ledgerProduct]);
+    return [...ledgerEntries].sort((a, b) => b.date.localeCompare(a.date));
+  }, [ledgerEntries]);
 
   return (
     <section className="space-y-6">
@@ -789,8 +847,8 @@ export default function ProductsPage() {
         </div>
       )}
 
-      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="w-full">
+      <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="w-full overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
               <tr>
@@ -815,24 +873,19 @@ export default function ProductsPage() {
                 <th className="hidden px-4 py-3 md:table-cell">
                   Onhand Quantity
                 </th>
-                <th className="hidden px-4 py-3 md:table-cell">Unit Price</th>
-                <th className="hidden px-4 py-3 md:table-cell">
-                  Onhand Total
-                </th>
-                <th className="hidden px-4 py-3 md:table-cell">Total</th>
                 <th className="hidden px-4 py-3 md:table-cell">Actions</th>
-                <th className="px-4 py-3 text-right md:hidden">More</th>
+                <th className="px-4 py-3 pr-6 text-right md:hidden">More</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredProducts.length === 0 && (
                 <tr>
-                  <td
-                    colSpan={12}
-                    className="px-4 py-8 text-center text-sm text-slate-500"
-                  >
-                    No products found.
-                  </td>
+                    <td
+                      colSpan={9}
+                      className="px-4 py-8 text-center text-sm text-slate-500"
+                    >
+                      No products found.
+                    </td>
                 </tr>
               )}
               {pagedProducts.map((row) => (
@@ -859,8 +912,9 @@ export default function ProductsPage() {
                       <button
                         type="button"
                         onClick={() => openLedger(row)}
-                        className="cursor-pointer font-semibold text-blue-600 underline-offset-2 hover:underline"
+                        className="inline-flex items-center gap-2 rounded-lg border border-sky-200 px-3 py-1 text-sm font-semibold text-sky-700 transition hover:border-sky-400 hover:text-sky-800"
                       >
+                        <span className="inline-flex">{LedgerIcon}</span>
                         {row.product}
                       </button>
                     </td>
@@ -873,15 +927,6 @@ export default function ProductsPage() {
                     </td>
                     <td className="hidden px-4 py-3 text-slate-500 md:table-cell">
                       {row.onhandQty.toLocaleString()}
-                    </td>
-                    <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
-                      {formatCurrency(row.unitPrice)}
-                    </td>
-                    <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
-                      {formatCurrency(row.onhandQty * row.unitPrice)}
-                    </td>
-                    <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
-                      {formatCurrency(row.totalQty * row.unitPrice)}
                     </td>
                     <td className="hidden px-4 py-3 md:table-cell">
                       <button
@@ -916,15 +961,15 @@ export default function ProductsPage() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => openOutgoing(row)}
+                        onClick={() => handleStockCardPdf(row)}
                         className={`${iconButton} ml-2`}
-                        aria-label="Outgoing stocks"
-                        title="Outgoing"
+                        aria-label="Save stock card as PDF"
+                        title="Save PDF"
                       >
-                        {OutgoingIcon}
+                        {PdfIcon}
                       </button>
                     </td>
-                    <td className="px-4 py-3 text-right md:hidden">
+                    <td className="px-4 py-3 pr-6 text-right md:hidden">
                       <button
                         type="button"
                         onClick={() =>
@@ -941,7 +986,7 @@ export default function ProductsPage() {
                   </tr>
                   {expandedRows[row.id] && (
                     <tr className="md:hidden">
-                      <td colSpan={12} className="px-4 pb-4">
+                      <td colSpan={9} className="px-4 pb-4">
                         <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
                           <div className="flex items-center justify-between">
                             <span className="text-xs font-semibold uppercase text-slate-500">
@@ -960,28 +1005,6 @@ export default function ProductsPage() {
                               Onhand Qty
                             </span>
                             <span>{row.onhandQty.toLocaleString()}</span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold uppercase text-slate-500">
-                              Unit Price
-                            </span>
-                            <span>{formatCurrency(row.unitPrice)}</span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold uppercase text-slate-500">
-                              Onhand Total
-                            </span>
-                            <span>
-                              {formatCurrency(row.onhandQty * row.unitPrice)}
-                            </span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold uppercase text-slate-500">
-                              Total
-                            </span>
-                            <span>
-                              {formatCurrency(row.totalQty * row.unitPrice)}
-                            </span>
                           </div>
                           <div className="flex items-center gap-2 pt-2">
                             <button
@@ -1018,12 +1041,12 @@ export default function ProductsPage() {
                             </button>
                             <button
                               type="button"
-                              onClick={() => openOutgoing(row)}
+                              onClick={() => handleStockCardPdf(row)}
                               className={iconButton}
-                              aria-label="Outgoing stocks"
-                              title="Outgoing"
+                              aria-label="Save stock card as PDF"
+                              title="Save PDF"
                             >
-                              {OutgoingIcon}
+                              {PdfIcon}
                             </button>
                           </div>
                         </div>
@@ -1050,7 +1073,7 @@ export default function ProductsPage() {
         open={productModalOpen}
         onClose={() => {
           setProductModalOpen(false);
-          setError(null);
+          setProductError(null);
         }}
       >
         <form
@@ -1142,20 +1165,6 @@ export default function ProductsPage() {
               }`}
             />
           </label>
-          <label className="text-sm font-medium text-slate-700">
-            Unit Price
-            <input
-              type="number"
-              value={productForm.unitPrice}
-              onChange={(event) =>
-                setProductForm((prev) => ({
-                  ...prev,
-                  unitPrice: event.target.value,
-                }))
-              }
-              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-            />
-          </label>
           <label className="text-sm font-medium text-slate-700 md:col-span-2">
             Notes
             <textarea
@@ -1169,9 +1178,9 @@ export default function ProductsPage() {
               className="mt-2 min-h-[100px] w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
             />
           </label>
-          {error && (
+          {productError && (
             <p className="md:col-span-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
-              {error}
+              {productError}
             </p>
           )}
           <div className="md:col-span-2 flex flex-wrap justify-end gap-3 pt-2">
@@ -1251,9 +1260,9 @@ export default function ProductsPage() {
             </p>
             <p>Returns increase Onhand only (Total stays the same).</p>
           </div>
-          {error && (
+          {incomingError && (
             <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
-              {error}
+              {incomingError}
             </p>
           )}
           <div className="flex flex-wrap justify-end gap-3">
@@ -1319,9 +1328,9 @@ export default function ProductsPage() {
             <p className="font-semibold">How this affects quantities</p>
             <p className="mt-1">Outgoing reduces Onhand quantity only.</p>
           </div>
-          {error && (
+          {outgoingError && (
             <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
-              {error}
+              {outgoingError}
             </p>
           )}
           <div className="flex flex-wrap justify-end gap-3">
@@ -1364,18 +1373,18 @@ export default function ProductsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {ledgerRows.map(({ entry, balance }) => (
+                {ledgerRows.map((entry) => (
                   <tr key={entry.id}>
                     <td className="px-3 py-2 text-slate-600">{entry.date}</td>
                     <td className="px-3 py-2 text-slate-700">{entry.type}</td>
                     <td className="px-3 py-2 text-right text-emerald-600">
-                      {entry.direction === "in" ? entry.qty : ""}
+                      {entry.qtyIn || ""}
                     </td>
                     <td className="px-3 py-2 text-right text-rose-600">
-                      {entry.direction === "out" ? entry.qty : ""}
+                      {entry.qtyOut || ""}
                     </td>
                     <td className="px-3 py-2 text-right text-slate-700">
-                      {balance}
+                      {entry.balance ?? "-"}
                     </td>
                     <td className="px-3 py-2 text-slate-500">{entry.ref}</td>
                   </tr>
@@ -1421,7 +1430,7 @@ export default function ProductsPage() {
         open={categoryModalOpen}
         onClose={() => {
           setCategoryModalOpen(false);
-          setError(null);
+          setCategoryError(null);
         }}
       >
         <form
@@ -1440,9 +1449,9 @@ export default function ProductsPage() {
               className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
             />
           </label>
-          {error && (
+          {categoryError && (
             <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
-              {error}
+              {categoryError}
             </p>
           )}
           <div className="flex flex-wrap justify-end gap-3">

@@ -3,36 +3,37 @@
 import React from "react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import {
-  addDoc,
   collection,
+  deleteDoc,
+  doc,
   onSnapshot,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/components/AuthProvider";
-import MultiSelect from "@/components/MultiSelect";
 import TablePagination from "@/components/TablePagination";
+import { logAction } from "@/lib/logs";
 
-type DeliveryRow = {
+type OutboundItem = {
   id: string;
-  status: string;
-  drDate: string;
-  drNo: string;
-  customerName: string;
-  address: string;
-  contactNo: string;
+  productId: string;
+  productName: string;
+  category: string;
+  unit: string;
+  quantity: number;
 };
 
-type CustomerFormState = {
-  name: string;
-  address: string;
-  contactNo: string;
-};
-
-const emptyCustomer: CustomerFormState = {
-  name: "",
-  address: "",
-  contactNo: "",
+type OutboundRow = {
+  id: string;
+  referenceNo: string;
+  outboundType: string;
+  receiver: string;
+  receiverName: string;
+  dateTime: string;
+  items: OutboundItem[];
+  status?: "Draft" | "Closed";
 };
 
 const iconBase = "h-4 w-4";
@@ -50,41 +51,20 @@ const PlusIcon = (
   </svg>
 );
 
-const UserIcon = (
+const BoxIcon = (
   <svg viewBox="0 0 24 24" className={iconBase} fill="none">
     <path
-      d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4Z"
+      d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Z"
       stroke="currentColor"
       strokeWidth="1.6"
+      strokeLinejoin="round"
     />
     <path
-      d="M4 20a8 8 0 0 1 16 0"
+      d="M12 21v-9M4 7.5l8 4.5 8-4.5"
       stroke="currentColor"
       strokeWidth="1.6"
-      strokeLinecap="round"
+      strokeLinejoin="round"
     />
-  </svg>
-);
-
-const ListIcon = (
-  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
-    <path
-      d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-    />
-  </svg>
-);
-
-const EyeIcon = (
-  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
-    <path
-      d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12Z"
-      stroke="currentColor"
-      strokeWidth="1.6"
-    />
-    <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.6" />
   </svg>
 );
 
@@ -96,6 +76,46 @@ const EditIcon = (
       strokeWidth="1.6"
       strokeLinejoin="round"
     />
+  </svg>
+);
+
+const PdfIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M6 3h9l4 4v14H6V3Z"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M9 11h6M9 15h6"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
+const TrashIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M4 7h16M9 7V5h6v2M7 7l1 12h8l1-12"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const EyeIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6-10-6-10-6Z"
+      stroke="currentColor"
+      strokeWidth="1.6"
+    />
+    <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.6" />
   </svg>
 );
 
@@ -134,93 +154,136 @@ function Modal({
 export default function DeliveriesPage() {
   const { user, loading } = useAuth();
   const pageSize = 10;
-  const [deliveries, setDeliveries] = useState<DeliveryRow[]>([]);
-  const [customerModalOpen, setCustomerModalOpen] = useState(false);
-  const [customerForm, setCustomerForm] = useState<CustomerFormState>(emptyCustomer);
-  const [error, setError] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState("");
-  const [drDateFilter, setDrDateFilter] = useState<string[]>([]);
-  const [drNoFilter, setDrNoFilter] = useState<string[]>([]);
-  const [customerFilter, setCustomerFilter] = useState<string[]>([]);
-  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [outbounds, setOutbounds] = useState<OutboundRow[]>([]);
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
   const [deliveryPage, setDeliveryPage] = useState(1);
   const [deliveryShowAll, setDeliveryShowAll] = useState(false);
-
-  const hasActiveFilters =
-    Boolean(statusFilter) ||
-    drDateFilter.length > 0 ||
-    drNoFilter.length > 0 ||
-    customerFilter.length > 0;
-
-  const drDateOptions = useMemo(
-    () => Array.from(new Set(deliveries.map((row) => row.drDate))).sort(),
-    [deliveries],
-  );
-  const drNoOptions = useMemo(
-    () => Array.from(new Set(deliveries.map((row) => row.drNo))).sort(),
-    [deliveries],
-  );
-  const customerOptions = useMemo(
-    () => Array.from(new Set(deliveries.map((row) => row.customerName))).sort(),
-    [deliveries],
+  const [productsModalOpen, setProductsModalOpen] = useState(false);
+  const [selectedOutbound, setSelectedOutbound] = useState<OutboundRow | null>(null);
+  const [selectedDraftIds, setSelectedDraftIds] = useState<string[]>([]);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<"All" | "Draft" | "Closed">(
+    "All",
   );
 
-  const filteredDeliveries = useMemo(
-    () =>
-      deliveries.filter((row) => {
-        const statusMatch = !statusFilter || row.status === statusFilter;
-        const dateMatch =
-          drDateFilter.length === 0 || drDateFilter.includes(row.drDate);
-        const drNoMatch =
-          drNoFilter.length === 0 || drNoFilter.includes(row.drNo);
-        const customerMatch =
-          customerFilter.length === 0 || customerFilter.includes(row.customerName);
-        return statusMatch && dateMatch && drNoMatch && customerMatch;
-      }),
-    [deliveries, statusFilter, drDateFilter, drNoFilter, customerFilter],
-  );
+  const filteredOutbounds = useMemo(() => {
+    if (statusFilter === "All") return outbounds;
+    return outbounds.filter((row) => (row.status ?? "Closed") === statusFilter);
+  }, [outbounds, statusFilter]);
 
-  const pagedDeliveries = useMemo(() => {
-    if (deliveryShowAll) return filteredDeliveries;
+  const pagedOutbounds = useMemo(() => {
+    if (deliveryShowAll) return filteredOutbounds;
     const start = (deliveryPage - 1) * pageSize;
-    return filteredDeliveries.slice(start, start + pageSize);
-  }, [filteredDeliveries, deliveryPage, deliveryShowAll]);
+    return filteredOutbounds.slice(start, start + pageSize);
+  }, [filteredOutbounds, deliveryPage, deliveryShowAll]);
+
+  const visibleDraftIds = useMemo(
+    () =>
+      pagedOutbounds
+        .filter((row) => (row.status ?? "Closed") === "Draft")
+        .map((row) => row.id),
+    [pagedOutbounds],
+  );
+  const allDraftSelected =
+    visibleDraftIds.length > 0 &&
+    visibleDraftIds.every((id) => selectedDraftIds.includes(id));
+  const someDraftSelected =
+    visibleDraftIds.some((id) => selectedDraftIds.includes(id)) &&
+    !allDraftSelected;
 
   useEffect(() => {
     setDeliveryPage(1);
-  }, [filteredDeliveries.length]);
+  }, [filteredOutbounds.length]);
+
+  useEffect(() => {
+    setSelectedDraftIds((prev) => prev.filter((id) =>
+      outbounds.some((row) => row.id === id && (row.status ?? "Closed") === "Draft"),
+    ));
+  }, [outbounds]);
 
   useEffect(() => {
     if (!user) return;
     const deliveriesRef = collection(db, "deliveries");
     const unsubscribe = onSnapshot(deliveriesRef, (snapshot) => {
       const rows = snapshot.docs.map((docSnap) => {
-        const data = docSnap.data() as Omit<DeliveryRow, "id">;
+        const data = docSnap.data() as Omit<OutboundRow, "id">;
         return { id: docSnap.id, ...data };
       });
-      rows.sort((a, b) => b.drDate.localeCompare(a.drDate));
-      setDeliveries(rows);
+      rows.sort((a, b) => b.dateTime?.localeCompare(a.dateTime ?? "") ?? 0);
+      setOutbounds(rows);
     });
     return () => unsubscribe();
   }, [user]);
 
-  const saveCustomer = async () => {
-    setError(null);
-    const name = customerForm.name.trim();
-    const address = customerForm.address.trim();
-    const contactNo = customerForm.contactNo.trim();
-    if (!name || !address || !contactNo) {
-      setError("Customer, address, and contact number are required.");
+  const openProductsModal = (row: OutboundRow) => {
+    setSelectedOutbound(row);
+    setProductsModalOpen(true);
+  };
+
+  const toggleAllDrafts = () => {
+    if (allDraftSelected) {
+      setSelectedDraftIds((prev) => prev.filter((id) => !visibleDraftIds.includes(id)));
       return;
     }
-    await addDoc(collection(db, "customers"), {
-      name,
-      address,
-      contactNo,
+    setSelectedDraftIds((prev) => Array.from(new Set([...prev, ...visibleDraftIds])));
+  };
+
+  const toggleDraft = (id: string) => {
+    setSelectedDraftIds((prev) =>
+      prev.includes(id) ? prev.filter((value) => value !== id) : [...prev, id],
+    );
+  };
+
+  const deleteDrafts = async () => {
+    if (!selectedDraftIds.length) return;
+    for (const id of selectedDraftIds) {
+      await deleteDoc(doc(db, "deliveries", id));
+      await logAction(user, {
+        action: "Deleted draft outbound",
+        entity: "outbound",
+        entityId: id,
+      });
+    }
+    setSelectedDraftIds([]);
+    setConfirmDeleteOpen(false);
+  };
+
+  const handleOutboundPdf = (row: OutboundRow) => {
+    const docPdf = new jsPDF({ orientation: "portrait" });
+    const now = new Date();
+    docPdf.setFontSize(14);
+    docPdf.text(`Outbound - ${row.referenceNo}`, 14, 18);
+    docPdf.setFontSize(10);
+    docPdf.text(
+      `Generated: ${now.toLocaleDateString("en-PH")} ${now.toLocaleTimeString("en-PH")}`,
+      14,
+      26,
+    );
+    docPdf.text(`Status: ${row.status ?? "Closed"}`, 14, 32);
+    docPdf.text(`Type: ${row.outboundType}`, 14, 38);
+    docPdf.text(`Receiver: ${row.receiver}`, 14, 44);
+    docPdf.text(`Receiver Name: ${row.receiverName}`, 14, 50);
+    docPdf.text(`Date & Time: ${row.dateTime?.replace("T", " ")}`, 14, 56);
+
+    const rows = (row.items ?? []).map((item) => [
+      item.productName,
+      item.category,
+      item.unit,
+      String(item.quantity),
+    ]);
+
+    autoTable(docPdf, {
+      startY: 64,
+      head: [["Product", "Category", "UoM", "Quantity"]],
+      body: rows,
+      styles: { fontSize: 9 },
+      headStyles: { fillColor: [15, 23, 42] },
     });
-    setCustomerForm(emptyCustomer);
-    setCustomerModalOpen(false);
+
+    const blob = docPdf.output("blob");
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank", "noopener,noreferrer");
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
   };
 
   return (
@@ -232,7 +295,7 @@ export default function DeliveriesPage() {
       )}
       {!loading && !user && (
         <div className="rounded-2xl border border-slate-200 bg-white px-4 py-6 text-sm text-slate-600 shadow-sm">
-          Please sign in to view deliveries.
+          Please sign in to view outbound records.
         </div>
       )}
       {!loading && !user ? null : (
@@ -240,171 +303,168 @@ export default function DeliveriesPage() {
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Deliveries
+                Outbound
               </p>
-              <div className="flex items-center gap-3">
-                <h1 className="text-2xl font-semibold text-slate-900">
-                  Manage Deliveries
-                </h1>
-                <button
-                  type="button"
-                  onClick={() => setFiltersOpen((prev) => !prev)}
-                  className="relative inline-flex items-center justify-center rounded-lg border border-slate-200 p-2 text-slate-600 hover:border-slate-400 hover:text-slate-900"
-                  aria-label="Toggle filters"
-                  title="Toggle filters"
-                >
-                  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none">
-                    <path
-                      d="M4 6h16M7 12h10M10 18h4"
-                      stroke="currentColor"
-                      strokeWidth="1.6"
-                      strokeLinecap="round"
-                    />
-                  </svg>
-                  {hasActiveFilters && (
-                    <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-emerald-500" />
-                  )}
-                </button>
-              </div>
+              <h1 className="text-2xl font-semibold text-slate-900">
+                Manage Outbound
+              </h1>
             </div>
             <div className="flex flex-wrap items-center gap-3">
+              <label className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600">
+                Status
+                <select
+                  value={statusFilter}
+                  onChange={(event) =>
+                    setStatusFilter(event.target.value as "All" | "Draft" | "Closed")
+                  }
+                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-600"
+                >
+                  <option value="All">All</option>
+                  <option value="Draft">Draft</option>
+                  <option value="Closed">Closed</option>
+                </select>
+              </label>
               <Link
                 href="/deliveries/new"
                 className="inline-flex items-baseline gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-slate-800"
               >
                 <span className="relative top-[1px] inline-flex">{PlusIcon}</span>
-                New DR
+                New Outbound
               </Link>
-              <button
-                type="button"
-                onClick={() => setCustomerModalOpen(true)}
-                className="inline-flex items-baseline gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:border-slate-400"
-              >
-                <span className="relative top-[1px] inline-flex">{UserIcon}</span>
-                New Customer
-              </button>
-              <Link
-                href="/customers"
-                className="inline-flex items-baseline gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:border-slate-400"
-              >
-                <span className="relative top-[1px] inline-flex">{ListIcon}</span>
-                Customer List
-              </Link>
+              {selectedDraftIds.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-semibold text-rose-700"
+                >
+                  <span className="inline-flex">{TrashIcon}</span>
+                  Delete Drafts
+                </button>
+              )}
             </div>
           </div>
 
-          {filtersOpen && (
-            <div className="grid gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:grid-cols-4">
-              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Status
-                <select
-                  value={statusFilter}
-                  onChange={(event) => setStatusFilter(event.target.value)}
-                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-700"
-                >
-                  <option value="">All</option>
-                  <option value="Open">Open</option>
-                  <option value="Closed">Closed</option>
-                </select>
-              </label>
-              <MultiSelect
-                label="DR Date"
-                options={drDateOptions}
-                values={drDateFilter}
-                onChange={setDrDateFilter}
-                placeholder="All dates"
-              />
-              <MultiSelect
-                label="DR No."
-                options={drNoOptions}
-                values={drNoFilter}
-                onChange={setDrNoFilter}
-                placeholder="All DR numbers"
-              />
-              <MultiSelect
-                label="Customer"
-                options={customerOptions}
-                values={customerFilter}
-                onChange={setCustomerFilter}
-                placeholder="All customers"
-              />
-            </div>
-          )}
-
-          <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-            <div className="w-full">
+          <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <div className="w-full overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                   <tr>
-                    <th className="px-4 py-3">Status</th>
-                    <th className="px-4 py-3">DR Date</th>
-                    <th className="px-4 py-3">DR No.</th>
-                    <th className="hidden px-4 py-3 md:table-cell">Customer</th>
-                    <th className="hidden px-4 py-3 md:table-cell">Address</th>
-                    <th className="hidden px-4 py-3 md:table-cell">Contact No.</th>
+                    <th className="px-4 py-3">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4"
+                        checked={allDraftSelected}
+                        ref={(input) => {
+                          if (input) input.indeterminate = Boolean(someDraftSelected);
+                        }}
+                        onChange={toggleAllDrafts}
+                        aria-label="Select all drafts"
+                      />
+                    </th>
+                    <th className="px-4 py-3">Reference No.</th>
+                    <th className="px-4 py-3">Type</th>
+                    <th className="px-4 py-3">Receiver</th>
+                    <th className="hidden px-4 py-3 md:table-cell">Fullname</th>
+                    <th className="hidden px-4 py-3 md:table-cell">Date & Time</th>
+                    <th className="hidden px-4 py-3 md:table-cell">Status</th>
+                    <th className="hidden px-4 py-3 md:table-cell">Products</th>
                     <th className="hidden px-4 py-3 md:table-cell">Actions</th>
-                    <th className="px-4 py-3 text-right md:hidden">More</th>
+                    <th className="px-4 py-3 pr-6 text-right md:hidden">More</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {filteredDeliveries.length === 0 && (
+                  {filteredOutbounds.length === 0 && (
                     <tr>
                       <td
-                        colSpan={8}
+                        colSpan={10}
                         className="px-4 py-8 text-center text-sm text-slate-500"
                       >
-                        No delivery records found.
+                        No outbound records found.
                       </td>
                     </tr>
                   )}
-                  {pagedDeliveries.map((row) => (
+                  {pagedOutbounds.map((row) => {
+                    const status = row.status ?? "Closed";
+                    return (
                     <React.Fragment key={row.id}>
                       <tr className="hover:bg-slate-50">
-                        <td
-                          className={`px-4 py-3 font-semibold ${
-                            row.status === "Open"
-                              ? "text-emerald-600"
-                              : row.status === "Closed"
-                                ? "text-rose-600"
-                                : "text-slate-600"
-                          }`}
-                        >
-                          {row.status}
+                        <td className="px-4 py-3">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4"
+                            disabled={status !== "Draft"}
+                            checked={selectedDraftIds.includes(row.id)}
+                            onChange={() => toggleDraft(row.id)}
+                            aria-label={`Select ${row.referenceNo}`}
+                          />
+                        </td>
+                        <td className="px-4 py-3 text-slate-700">
+                          {row.referenceNo}
                         </td>
                         <td className="px-4 py-3 text-slate-600">
-                          {row.drDate}
+                          {row.outboundType}
                         </td>
-                        <td className="px-4 py-3 text-slate-700">{row.drNo}</td>
+                        <td className="px-4 py-3 text-slate-600">
+                          {row.receiver}
+                        </td>
                         <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
-                          {row.customerName}
+                          {row.receiverName}
                         </td>
                         <td className="hidden px-4 py-3 text-slate-600 md:table-cell">
-                          {row.address}
-                        </td>
-                        <td className="hidden px-4 py-3 text-slate-600 md:table-cell">
-                          {row.contactNo}
+                          {row.dateTime?.replace("T", " ")}
                         </td>
                         <td className="hidden px-4 py-3 md:table-cell">
-                          <Link
-                            href={`/deliveries/${row.id}`}
-                            className={iconButton}
-                            aria-label="View delivery"
-                            title="View"
+                          <span
+                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
+                              status === "Draft"
+                                ? "bg-amber-100 text-amber-700"
+                                : "bg-emerald-100 text-emerald-700"
+                            }`}
                           >
-                            {EyeIcon}
-                          </Link>
-                          {row.status !== "Closed" && (
+                            {status}
+                          </span>
+                        </td>
+                        <td className="hidden px-4 py-3 md:table-cell">
+                          <button
+                            type="button"
+                            onClick={() => openProductsModal(row)}
+                            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 hover:border-slate-400"
+                          >
+                            <span className="inline-flex">{BoxIcon}</span>
+                            View Products
+                          </button>
+                        </td>
+                        <td className="hidden px-4 py-3 md:table-cell">
+                          {status === "Draft" ? (
                             <Link
                               href={`/deliveries/${row.id}/edit`}
-                              className={`${iconButton} ml-2`}
-                              aria-label="Edit delivery"
+                              className={iconButton}
+                              aria-label="Edit outbound"
                               title="Edit"
                             >
                               {EditIcon}
                             </Link>
+                          ) : (
+                            <Link
+                              href={`/deliveries/${row.id}`}
+                              className={iconButton}
+                              aria-label="View outbound"
+                              title="View"
+                            >
+                              {EyeIcon}
+                            </Link>
                           )}
+                          <button
+                            type="button"
+                            onClick={() => handleOutboundPdf(row)}
+                            className={`${iconButton} ml-2`}
+                            aria-label="Save outbound as PDF"
+                            title="Save PDF"
+                          >
+                            {PdfIcon}
+                          </button>
                         </td>
-                        <td className="px-4 py-3 text-right md:hidden">
+                        <td className="px-4 py-3 pr-6 text-right md:hidden">
                           <button
                             type="button"
                             onClick={() =>
@@ -421,58 +481,92 @@ export default function DeliveriesPage() {
                       </tr>
                       {expandedRows[row.id] && (
                         <tr className="md:hidden">
-                          <td colSpan={8} className="px-4 pb-4">
+                          <td colSpan={10} className="px-4 pb-4">
                             <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
                               <div className="flex items-center justify-between">
                                 <span className="text-xs font-semibold uppercase text-slate-500">
-                                  Customer
+                                  Fullname
                                 </span>
-                                <span>{row.customerName}</span>
+                                <span>{row.receiverName}</span>
                               </div>
                               <div className="flex items-center justify-between">
                                 <span className="text-xs font-semibold uppercase text-slate-500">
-                                  Address
+                                  Date & Time
                                 </span>
-                                <span className="text-right">{row.address}</span>
+                                <span className="text-right">
+                                  {row.dateTime?.replace("T", " ")}
+                                </span>
                               </div>
                               <div className="flex items-center justify-between">
                                 <span className="text-xs font-semibold uppercase text-slate-500">
-                                  Contact
+                                  Status
                                 </span>
-                                <span>{row.contactNo}</span>
+                                <span
+                                  className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                                    status === "Draft"
+                                      ? "bg-amber-100 text-amber-700"
+                                      : "bg-emerald-100 text-emerald-700"
+                                  }`}
+                                >
+                                  {status}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs font-semibold uppercase text-slate-500">
+                                  Products
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => openProductsModal(row)}
+                                  className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 hover:border-slate-400"
+                                >
+                                  <span className="inline-flex">{BoxIcon}</span>
+                                  View Products
+                                </button>
                               </div>
                               <div className="flex items-center gap-2 pt-2">
-                                <Link
-                                  href={`/deliveries/${row.id}`}
-                                  className={iconButton}
-                                  aria-label="View delivery"
-                                  title="View"
-                                >
-                                  {EyeIcon}
-                                </Link>
-                                {row.status !== "Closed" && (
+                                {status === "Draft" ? (
                                   <Link
                                     href={`/deliveries/${row.id}/edit`}
                                     className={iconButton}
-                                    aria-label="Edit delivery"
+                                    aria-label="Edit outbound"
                                     title="Edit"
                                   >
                                     {EditIcon}
                                   </Link>
+                                ) : (
+                                  <Link
+                                    href={`/deliveries/${row.id}`}
+                                    className={iconButton}
+                                    aria-label="View outbound"
+                                    title="View"
+                                  >
+                                    {EyeIcon}
+                                  </Link>
                                 )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleOutboundPdf(row)}
+                                  className={iconButton}
+                                  aria-label="Save outbound as PDF"
+                                  title="Save PDF"
+                                >
+                                  {PdfIcon}
+                                </button>
                               </div>
                             </div>
                           </td>
                         </tr>
                       )}
                     </React.Fragment>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           </div>
           <TablePagination
-            total={filteredDeliveries.length}
+            total={filteredOutbounds.length}
             page={deliveryPage}
             pageSize={pageSize}
             showAll={deliveryShowAll}
@@ -481,83 +575,73 @@ export default function DeliveriesPage() {
           />
 
           <Modal
-            title="New Customer"
-            open={customerModalOpen}
-            onClose={() => {
-              setCustomerModalOpen(false);
-              setError(null);
-            }}
+            title={`Outbound Products${selectedOutbound ? ` - ${selectedOutbound.referenceNo}` : ""}`}
+            open={productsModalOpen}
+            onClose={() => setProductsModalOpen(false)}
           >
-            <form
-              className="space-y-4"
-              onSubmit={(event) => {
-                event.preventDefault();
-                saveCustomer();
-              }}
-            >
-              <label className="block text-sm font-medium text-slate-700">
-                Customer
-                <input
-                  type="text"
-                  value={customerForm.name}
-                  onChange={(event) =>
-                    setCustomerForm((prev) => ({
-                      ...prev,
-                      name: event.target.value,
-                    }))
-                  }
-                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                />
-              </label>
-              <label className="block text-sm font-medium text-slate-700">
-                Address
-                <input
-                  type="text"
-                  value={customerForm.address}
-                  onChange={(event) =>
-                    setCustomerForm((prev) => ({
-                      ...prev,
-                      address: event.target.value,
-                    }))
-                  }
-                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                />
-              </label>
-              <label className="block text-sm font-medium text-slate-700">
-                Contact No.
-                <input
-                  type="text"
-                  value={customerForm.contactNo}
-                  onChange={(event) =>
-                    setCustomerForm((prev) => ({
-                      ...prev,
-                      contactNo: event.target.value,
-                    }))
-                  }
-                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                />
-              </label>
-              {error && (
-                <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
-                  {error}
-                </p>
-              )}
+            {selectedOutbound?.items?.length ? (
+              <div className="overflow-hidden rounded-xl border border-slate-200">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">Product</th>
+                      <th className="px-4 py-3">Category</th>
+                      <th className="px-4 py-3">UoM</th>
+                      <th className="px-4 py-3 text-right">Quantity</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {selectedOutbound.items.map((item) => (
+                      <tr key={item.id}>
+                        <td className="px-4 py-3 text-slate-700">
+                          {item.productName}
+                        </td>
+                        <td className="px-4 py-3 text-slate-600">
+                          {item.category}
+                        </td>
+                        <td className="px-4 py-3 text-slate-600">{item.unit}</td>
+                        <td className="px-4 py-3 text-right text-slate-700">
+                          {item.quantity}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-sm text-slate-500">No products recorded.</p>
+            )}
+          </Modal>
+
+          <Modal
+            title="Delete Drafts"
+            open={confirmDeleteOpen}
+            onClose={() => setConfirmDeleteOpen(false)}
+          >
+            <div className="space-y-4 text-sm text-slate-700">
+              <p>
+                Delete {selectedDraftIds.length} selected draft
+                {selectedDraftIds.length === 1 ? "" : "s"}? This action cannot be
+                undone.
+              </p>
               <div className="flex flex-wrap justify-end gap-3">
                 <button
                   type="button"
-                  onClick={() => setCustomerModalOpen(false)}
+                  onClick={() => setConfirmDeleteOpen(false)}
                   className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
                 >
                   Cancel
                 </button>
                 <button
-                  type="submit"
-                  className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+                  type="button"
+                  onClick={deleteDrafts}
+                  className="inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white"
                 >
-                  Save
+                  <span className="inline-flex">{TrashIcon}</span>
+                  Delete
                 </button>
               </div>
-            </form>
+            </div>
           </Modal>
         </>
       )}
