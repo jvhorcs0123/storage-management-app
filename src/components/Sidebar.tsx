@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { signOut } from "firebase/auth";
@@ -127,7 +128,14 @@ export default function Sidebar({
       >
         {!collapsed && (
           <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.2em] text-slate-300">
-            Storage Office
+            <Image
+              src="/branding_logo.png"
+              alt="3 Degrees logo"
+              width={20}
+              height={20}
+              className="h-5 w-5 rounded-sm"
+            />
+            Storage
           </div>
         )}
         <button

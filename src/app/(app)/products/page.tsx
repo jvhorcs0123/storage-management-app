@@ -238,11 +238,16 @@ export default function ProductsPage() {
   const [editingProduct, setEditingProduct] = useState<ProductRow | null>(null);
   const [notesModalOpen, setNotesModalOpen] = useState(false);
   const [notesPreview, setNotesPreview] = useState("");
+  const [notesProduct, setNotesProduct] = useState<ProductRow | null>(null);
+  const [notesDraft, setNotesDraft] = useState("");
+  const [notesEditing, setNotesEditing] = useState(false);
+  const [notesError, setNotesError] = useState<string | null>(null);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [incomingModalOpen, setIncomingModalOpen] = useState(false);
   const [incomingProduct, setIncomingProduct] = useState<ProductRow | null>(null);
   const [incomingQty, setIncomingQty] = useState("");
   const [incomingSource, setIncomingSource] = useState("Restock");
+  const [incomingBy, setIncomingBy] = useState("");
   const [outgoingModalOpen, setOutgoingModalOpen] = useState(false);
   const [outgoingProduct, setOutgoingProduct] = useState<ProductRow | null>(null);
   const [outgoingQty, setOutgoingQty] = useState("");
@@ -258,6 +263,7 @@ export default function ProductsPage() {
       qtyOut: number;
       balance?: number;
       ref: string;
+      actor: string;
     }>
   >([]);
   const [productError, setProductError] = useState<string | null>(null);
@@ -401,6 +407,7 @@ export default function ProductsPage() {
     setIncomingProduct(row);
     setIncomingQty("");
     setIncomingSource("Restock");
+    setIncomingBy("");
     setIncomingError(null);
     setProductError(null);
     setCategoryError(null);
@@ -423,6 +430,15 @@ export default function ProductsPage() {
     setLedgerProduct(row);
     setLedgerEntries([]);
     setLedgerOpen(true);
+  };
+
+  const getIncomingActor = (type: string, ref: string) => {
+    const isIncoming =
+      type === "Incoming (Restock)" || type === "Incoming (Return)";
+    if (!isIncoming) return "";
+    const parts = ref.split(" - ");
+    if (parts.length < 2) return "";
+    return parts.slice(1).join(" - ").trim();
   };
 
   const handleStockCardPdf = async (row: ProductRow) => {
@@ -449,6 +465,7 @@ export default function ProductsPage() {
         qtyOut: data.qtyOut ?? 0,
         balance: data.balanceAfter,
         ref: data.reference ?? "",
+        actor: getIncomingActor(data.type ?? "", data.reference ?? ""),
       };
     });
     entries.sort((a, b) => b.date.localeCompare(a.date));
@@ -475,12 +492,21 @@ export default function ProductsPage() {
       entry.qtyIn ? String(entry.qtyIn) : "",
       entry.qtyOut ? String(entry.qtyOut) : "",
       entry.balance !== undefined ? String(entry.balance) : "",
+      entry.actor,
       entry.ref,
     ]);
 
     autoTable(docPdf, {
       startY: 64,
-      head: [["Date", "Type", "In", "Out", "Balance", "Reference"]],
+      head: [[
+        "Date",
+        "Type",
+        "In",
+        "Out",
+        "Balance",
+        "Restocked/Returned by",
+        "Reference",
+      ]],
       body: rows,
       styles: { fontSize: 8 },
       headStyles: { fillColor: [15, 23, 42] },
@@ -582,9 +608,18 @@ export default function ProductsPage() {
   const applyIncomingStock = async () => {
     setIncomingError(null);
     if (!incomingProduct) return;
+    const incomingByTrimmed = incomingBy.trim();
     const qty = Number(incomingQty);
     if (!Number.isInteger(qty) || qty <= 0) {
       setIncomingError("Incoming quantity must be a positive integer.");
+      return;
+    }
+    if (!incomingByTrimmed) {
+      setIncomingError(
+        incomingSource === "Restock"
+          ? "Restocked by is required."
+          : "Returned by is required.",
+      );
       return;
     }
     const updates =
@@ -605,7 +640,7 @@ export default function ProductsPage() {
       qtyIn: qty,
       qtyOut: 0,
       balanceAfter: incomingProduct.onhandQty + qty,
-      reference: incomingSource,
+      reference: `${incomingSource} - ${incomingByTrimmed}`,
       source: incomingSource,
       userId: user?.uid,
       userName: user?.displayName ?? "",
@@ -619,7 +654,7 @@ export default function ProductsPage() {
       entity: "product",
       entityId: incomingProduct.id,
       entityName: incomingProduct.product,
-      details: { qty, source: incomingSource },
+      details: { qty, source: incomingSource, by: incomingByTrimmed },
     });
     setIncomingModalOpen(false);
   };
@@ -703,6 +738,7 @@ export default function ProductsPage() {
         qtyOut: number;
         balance?: number;
         ref: string;
+        actor: string;
       }> = [];
       snapshot.docs.forEach((docSnap) => {
         const data = docSnap.data() as {
@@ -721,6 +757,7 @@ export default function ProductsPage() {
           qtyOut: data.qtyOut ?? 0,
           balance: data.balanceAfter,
           ref: data.reference ?? "",
+          actor: getIncomingActor(data.type ?? "", data.reference ?? ""),
         });
       });
 
@@ -733,6 +770,26 @@ export default function ProductsPage() {
   const ledgerRows = useMemo(() => {
     return [...ledgerEntries].sort((a, b) => b.date.localeCompare(a.date));
   }, [ledgerEntries]);
+
+  const saveNotes = async () => {
+    if (!notesProduct) return;
+    setNotesError(null);
+    try {
+      await updateDoc(doc(db, "products", notesProduct.id), {
+        notes: notesDraft.trim(),
+      });
+      setNotesPreview(notesDraft.trim());
+      setNotesEditing(false);
+      await logAction(user, {
+        action: `Edited notes for ${notesProduct.product}`,
+        entity: "product",
+        entityId: notesProduct.id,
+        entityName: notesProduct.product,
+      });
+    } catch {
+      setNotesError("Unable to save notes. Please try again.");
+    }
+  };
 
   return (
     <section className="space-y-6">
@@ -941,7 +998,12 @@ export default function ProductsPage() {
                       <button
                         type="button"
                         onClick={() => {
-                          setNotesPreview(row.notes?.trim() || "No notes added.");
+                          setNotesError(null);
+                          setNotesProduct(row);
+                          const initialNotes = row.notes?.trim() ?? "";
+                          setNotesPreview(initialNotes);
+                          setNotesDraft(initialNotes);
+                          setNotesEditing(false);
                           setNotesModalOpen(true);
                         }}
                         className={`${iconButton} ml-2`}
@@ -1019,9 +1081,12 @@ export default function ProductsPage() {
                             <button
                               type="button"
                               onClick={() => {
-                                setNotesPreview(
-                                  row.notes?.trim() || "No notes added.",
-                                );
+                                setNotesError(null);
+                                setNotesProduct(row);
+                                const initialNotes = row.notes?.trim() ?? "";
+                                setNotesPreview(initialNotes);
+                                setNotesDraft(initialNotes);
+                                setNotesEditing(false);
                                 setNotesModalOpen(true);
                               }}
                               className={iconButton}
@@ -1204,10 +1269,43 @@ export default function ProductsPage() {
       <Modal
         title="Product Notes"
         open={notesModalOpen}
-        onClose={() => setNotesModalOpen(false)}
+        onClose={() => {
+          setNotesModalOpen(false);
+          setNotesEditing(false);
+          setNotesError(null);
+        }}
       >
-        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700">
-          {notesPreview}
+        <div className="space-y-4">
+          <textarea
+            value={notesEditing ? notesDraft : notesPreview}
+            onChange={(event) => setNotesDraft(event.target.value)}
+            readOnly={!notesEditing}
+            className={`min-h-[120px] w-full rounded-xl border px-4 py-3 text-sm ${
+              notesEditing
+                ? "border-slate-200 bg-white text-slate-700"
+                : "border-slate-200 bg-slate-50 text-slate-700"
+            }`}
+          />
+          {notesError && (
+            <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+              {notesError}
+            </p>
+          )}
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => {
+                if (notesEditing) {
+                  void saveNotes();
+                  return;
+                }
+                setNotesEditing(true);
+              }}
+              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+            >
+              {notesEditing ? "Save" : "Edit"}
+            </button>
+          </div>
         </div>
       </Modal>
 
@@ -1252,6 +1350,15 @@ export default function ProductsPage() {
               <option value="Restock">Restock</option>
               <option value="Returns">Returns</option>
             </select>
+          </label>
+          <label className="block text-sm font-medium text-slate-700">
+            {incomingSource === "Restock" ? "Restocked by" : "Returned by"}
+            <input
+              type="text"
+              value={incomingBy}
+              onChange={(event) => setIncomingBy(event.target.value)}
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            />
           </label>
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
             <p className="font-semibold">How this affects quantities</p>
@@ -1369,6 +1476,7 @@ export default function ProductsPage() {
                   <th className="px-3 py-2 text-right">In</th>
                   <th className="px-3 py-2 text-right">Out</th>
                   <th className="px-3 py-2 text-right">Balance</th>
+                  <th className="px-3 py-2">Restocked/Returned by</th>
                   <th className="px-3 py-2">Reference</th>
                 </tr>
               </thead>
@@ -1385,6 +1493,9 @@ export default function ProductsPage() {
                     </td>
                     <td className="px-3 py-2 text-right text-slate-700">
                       {entry.balance ?? "-"}
+                    </td>
+                    <td className="px-3 py-2 text-slate-600">
+                      {entry.actor || "-"}
                     </td>
                     <td className="px-3 py-2 text-slate-500">{entry.ref}</td>
                   </tr>

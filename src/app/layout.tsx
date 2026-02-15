@@ -16,6 +16,10 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Storage Office Management",
   description: "Product and storage management system.",
+  icons: {
+    icon: "/brand.ico",
+    shortcut: "/brand.ico",
+  },
 };
 
 export default function RootLayout({

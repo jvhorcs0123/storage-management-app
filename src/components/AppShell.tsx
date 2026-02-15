@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import Sidebar from "@/components/Sidebar";
 import { useAuth } from "@/components/AuthProvider";
 import { signOut } from "firebase/auth";
@@ -42,8 +43,15 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                 />
               </svg>
             </button>
-            <span className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">
-              Storage Office
+            <span className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">
+              <Image
+                src="/branding_logo.png"
+                alt="3 Degrees logo"
+                width={18}
+                height={18}
+                className="h-[18px] w-[18px] rounded-sm"
+              />
+              Storage
             </span>
             <div className="ml-auto rounded-xl border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600">
               Logged in as{" "}

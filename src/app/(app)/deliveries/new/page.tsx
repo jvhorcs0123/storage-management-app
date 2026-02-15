@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   collection,
@@ -366,6 +366,7 @@ export default function NewDeliveryPage() {
           >
             <option value="Cashier">Cashier</option>
             <option value="Agent">Agent</option>
+            <option value="Store Assistant">Store Assistant</option>
             <option value="Others">Others</option>
           </select>
         </label>
@@ -410,7 +411,7 @@ export default function NewDeliveryPage() {
                 </tr>
               )}
               {deliveryItems.map((item) => (
-                <>
+                <Fragment key={item.id}>
                   <tr key={item.id} className="hover:bg-slate-50">
                     <td className="px-4 py-3 text-slate-700">{item.category}</td>
                     <td className="px-4 py-3 text-slate-700">
@@ -497,7 +498,7 @@ export default function NewDeliveryPage() {
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               ))}
             </tbody>
           </table>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
@@ -175,7 +175,7 @@ export default function DeliveryViewPage() {
                 </tr>
               )}
               {delivery.items?.map((item) => (
-                <>
+                <Fragment key={item.id}>
                   <tr key={item.id} className="hover:bg-slate-50">
                     <td className="px-4 py-3 text-slate-700">{item.category}</td>
                     <td className="px-4 py-3 text-slate-700">
@@ -222,7 +222,7 @@ export default function DeliveryViewPage() {
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               ))}
             </tbody>
           </table>
