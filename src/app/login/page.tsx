@@ -99,7 +99,7 @@ export default function LoginPage() {
             </p>
             <p className="text-sm text-slate-400">
               Track products, deliveries, and storage inventory with a clean
-              operational dashboard.
+              operational dashboard. 
             </p>
           </div>
 
