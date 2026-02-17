@@ -3,19 +3,26 @@
 import React from "react";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import {
   addDoc,
   collection,
   doc,
+  getDocs,
   increment,
   onSnapshot,
+  query,
   updateDoc,
+  where,
   writeBatch,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/components/AuthProvider";
 import MultiSelect from "@/components/MultiSelect";
+import TablePagination from "@/components/TablePagination";
 import { logAction } from "@/lib/logs";
+import { addTransaction } from "@/lib/transactions";
 
 type ProductRow = {
   id: string;
@@ -25,7 +32,6 @@ type ProductRow = {
   unit: string;
   totalQty: number;
   onhandQty: number;
-  unitPrice: number;
   notes?: string;
 };
 
@@ -40,7 +46,6 @@ type ProductFormState = {
   sku: string;
   unit: string;
   quantity: string;
-  unitPrice: string;
   notes: string;
 };
 
@@ -50,17 +55,8 @@ const emptyProductForm: ProductFormState = {
   sku: "",
   unit: "",
   quantity: "",
-  unitPrice: "",
   notes: "",
 };
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-PH", {
-    style: "currency",
-    currency: "PHP",
-    currencyDisplay: "narrowSymbol",
-  }).format(value);
-}
 
 const iconBase = "h-4 w-4";
 const iconButton =
@@ -158,6 +154,40 @@ const IncomingIcon = (
   </svg>
 );
 
+const LedgerIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M6 4h9l3 3v13H6V4Z"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M8 12h8M8 16h6"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
+const PdfIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M6 3h9l4 4v14H6V3Z"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M9 11h6M9 15h6"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
 function Modal({
   title,
   open,
@@ -192,6 +222,7 @@ function Modal({
 
 export default function ProductsPage() {
   const { user, loading } = useAuth();
+  const pageSize = 10;
   const [productModalOpen, setProductModalOpen] = useState(false);
   const [categoryModalOpen, setCategoryModalOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -207,14 +238,42 @@ export default function ProductsPage() {
   const [editingProduct, setEditingProduct] = useState<ProductRow | null>(null);
   const [notesModalOpen, setNotesModalOpen] = useState(false);
   const [notesPreview, setNotesPreview] = useState("");
+  const [notesProduct, setNotesProduct] = useState<ProductRow | null>(null);
+  const [notesDraft, setNotesDraft] = useState("");
+  const [notesEditing, setNotesEditing] = useState(false);
+  const [notesError, setNotesError] = useState<string | null>(null);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [incomingModalOpen, setIncomingModalOpen] = useState(false);
   const [incomingProduct, setIncomingProduct] = useState<ProductRow | null>(null);
   const [incomingQty, setIncomingQty] = useState("");
   const [incomingSource, setIncomingSource] = useState("Restock");
-  const [error, setError] = useState<string | null>(null);
+  const [incomingBy, setIncomingBy] = useState("");
+  const [outgoingModalOpen, setOutgoingModalOpen] = useState(false);
+  const [outgoingProduct, setOutgoingProduct] = useState<ProductRow | null>(null);
+  const [outgoingQty, setOutgoingQty] = useState("");
+  const [outgoingDestination, setOutgoingDestination] = useState("Sale");
+  const [ledgerOpen, setLedgerOpen] = useState(false);
+  const [ledgerProduct, setLedgerProduct] = useState<ProductRow | null>(null);
+  const [ledgerEntries, setLedgerEntries] = useState<
+    Array<{
+      id: string;
+      type: string;
+      date: string;
+      qtyIn: number;
+      qtyOut: number;
+      balance?: number;
+      ref: string;
+      actor: string;
+    }>
+  >([]);
+  const [productError, setProductError] = useState<string | null>(null);
+  const [categoryError, setCategoryError] = useState<string | null>(null);
+  const [incomingError, setIncomingError] = useState<string | null>(null);
+  const [outgoingError, setOutgoingError] = useState<string | null>(null);
   const selectAllRef = useRef<HTMLInputElement>(null);
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+  const [productPage, setProductPage] = useState(1);
+  const [productShowAll, setProductShowAll] = useState(false);
 
   const hasActiveFilters =
     categoryFilter.length > 0 || productFilter.length > 0 || skuFilter.length > 0;
@@ -245,7 +304,13 @@ export default function ProductsPage() {
     [products, categoryFilter, productFilter, skuFilter],
   );
 
-  const visibleIds = filteredProducts.map((row) => row.id);
+  const pagedProducts = useMemo(() => {
+    if (productShowAll) return filteredProducts;
+    const start = (productPage - 1) * pageSize;
+    return filteredProducts.slice(start, start + pageSize);
+  }, [filteredProducts, productPage, productShowAll]);
+
+  const visibleIds = pagedProducts.map((row) => row.id);
   const allSelected =
     visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id));
   const someSelected =
@@ -286,6 +351,17 @@ export default function ProductsPage() {
     }
   }, [someSelected]);
 
+  useEffect(() => {
+    setProductPage(1);
+  }, [filteredProducts.length]);
+
+  const clampQtyInput = (value: string) => {
+    if (!value.trim()) return "";
+    const next = Math.floor(Number(value));
+    if (Number.isNaN(next)) return "";
+    return String(Math.max(0, next));
+  };
+
   const toggleAll = () => {
     if (allSelected) {
       setSelectedIds((prev) => prev.filter((id) => !visibleIds.includes(id)));
@@ -301,14 +377,20 @@ export default function ProductsPage() {
   };
 
   const openNewProduct = () => {
-    setError(null);
+    setProductError(null);
+    setCategoryError(null);
+    setIncomingError(null);
+    setOutgoingError(null);
     setEditingProduct(null);
     setProductForm(emptyProductForm);
     setProductModalOpen(true);
   };
 
   const openEditProduct = (row: ProductRow) => {
-    setError(null);
+    setProductError(null);
+    setCategoryError(null);
+    setIncomingError(null);
+    setOutgoingError(null);
     setEditingProduct(row);
     setProductForm({
       product: row.product,
@@ -316,7 +398,6 @@ export default function ProductsPage() {
       sku: row.sku,
       unit: row.unit,
       quantity: String(row.totalQty),
-      unitPrice: String(row.unitPrice),
       notes: row.notes ?? "",
     });
     setProductModalOpen(true);
@@ -326,26 +407,137 @@ export default function ProductsPage() {
     setIncomingProduct(row);
     setIncomingQty("");
     setIncomingSource("Restock");
-    setError(null);
+    setIncomingBy("");
+    setIncomingError(null);
+    setProductError(null);
+    setCategoryError(null);
+    setOutgoingError(null);
     setIncomingModalOpen(true);
   };
 
+  const openOutgoing = (row: ProductRow) => {
+    setOutgoingProduct(row);
+    setOutgoingQty("");
+    setOutgoingDestination("Sale");
+    setOutgoingError(null);
+    setProductError(null);
+    setCategoryError(null);
+    setIncomingError(null);
+    setOutgoingModalOpen(true);
+  };
+
+  const openLedger = (row: ProductRow) => {
+    setLedgerProduct(row);
+    setLedgerEntries([]);
+    setLedgerOpen(true);
+  };
+
+  const getIncomingActor = (type: string, ref: string, handledBy?: string) => {
+    const isIncoming =
+      type === "Incoming (Restock)" || type === "Incoming (Return)";
+    if (!isIncoming) return "";
+    if (handledBy?.trim()) return handledBy.trim();
+    const parts = ref.split(" - ");
+    if (parts.length < 2) return "";
+    return parts.slice(1).join(" - ").trim();
+  };
+
+  const handleStockCardPdf = async (row: ProductRow) => {
+    const transactionsRef = collection(db, "transactions");
+    const transactionsQuery = query(
+      transactionsRef,
+      where("productId", "==", row.id),
+    );
+    const snapshot = await getDocs(transactionsQuery);
+    const entries = snapshot.docs.map((docSnap) => {
+      const data = docSnap.data() as {
+        type?: string;
+        date?: string;
+        qtyIn?: number;
+        qtyOut?: number;
+        balanceAfter?: number;
+        reference?: string;
+        handledBy?: string;
+      };
+      return {
+        id: docSnap.id,
+        type: data.type ?? "",
+        date: data.date ?? "",
+        qtyIn: data.qtyIn ?? 0,
+        qtyOut: data.qtyOut ?? 0,
+        balance: data.balanceAfter,
+        ref: data.reference ?? "",
+        actor: getIncomingActor(
+          data.type ?? "",
+          data.reference ?? "",
+          data.handledBy,
+        ),
+      };
+    });
+    entries.sort((a, b) => b.date.localeCompare(a.date));
+
+    const docPdf = new jsPDF({ orientation: "portrait" });
+    const now = new Date();
+    docPdf.setFontSize(14);
+    docPdf.text(`Stock Card - ${row.product}`, 14, 18);
+    docPdf.setFontSize(10);
+    docPdf.text(
+      `Generated: ${now.toLocaleDateString("en-PH")} ${now.toLocaleTimeString("en-PH")}`,
+      14,
+      26,
+    );
+    docPdf.text(`Category: ${row.category}`, 14, 32);
+    docPdf.text(`SKU: ${row.sku || "-"}`, 14, 38);
+    docPdf.text(`UoM: ${row.unit}`, 14, 44);
+    docPdf.text(`Total Qty: ${row.totalQty}`, 14, 50);
+    docPdf.text(`Onhand Qty: ${row.onhandQty}`, 14, 56);
+
+    const rows = entries.map((entry) => [
+      entry.date,
+      entry.type,
+      entry.qtyIn ? String(entry.qtyIn) : "",
+      entry.qtyOut ? String(entry.qtyOut) : "",
+      entry.balance !== undefined ? String(entry.balance) : "",
+      entry.actor,
+      entry.ref,
+    ]);
+
+    autoTable(docPdf, {
+      startY: 64,
+      head: [[
+        "Date",
+        "Type",
+        "In",
+        "Out",
+        "Balance",
+        "Restocked/Returned by",
+        "Reference",
+      ]],
+      body: rows,
+      styles: { fontSize: 8 },
+      headStyles: { fillColor: [15, 23, 42] },
+    });
+
+    const blob = docPdf.output("blob");
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank", "noopener,noreferrer");
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  };
+
   const saveProduct = async () => {
-    setError(null);
+    setProductError(null);
     const trimmedProduct = productForm.product.trim();
     const trimmedCategory = productForm.category.trim();
     const trimmedSku = productForm.sku.trim();
     const trimmedUnit = productForm.unit.trim();
     const quantity = Number(productForm.quantity);
-    const unitPrice = Number(productForm.unitPrice);
-
     if (!trimmedProduct || !trimmedCategory || !trimmedUnit) {
-      setError("Product name, category, and unit are required.");
+      setProductError("Product name, category, and unit are required.");
       return;
     }
 
-    if (Number.isNaN(quantity) || Number.isNaN(unitPrice)) {
-      setError("Quantity and unit price must be valid numbers.");
+    if (Number.isNaN(quantity)) {
+      setProductError("Quantity must be a valid number.");
       return;
     }
 
@@ -356,7 +548,6 @@ export default function ProductsPage() {
       unit: trimmedUnit,
       totalQty: quantity,
       onhandQty: editingProduct ? editingProduct.onhandQty : quantity,
-      unitPrice,
       notes: productForm.notes.trim(),
     };
 
@@ -371,6 +562,22 @@ export default function ProductsPage() {
         });
       } else {
         const created = await addDoc(collection(db, "products"), payload);
+        await addTransaction({
+          productId: created.id,
+          productName: payload.product,
+          category: payload.category,
+          sku: payload.sku,
+          unit: payload.unit,
+          type: "Incoming (Initial Stock)",
+          qtyIn: payload.onhandQty,
+          qtyOut: 0,
+          balanceAfter: payload.onhandQty,
+          reference: "Initial Stock",
+          source: "Initial Stock",
+          userId: user?.uid,
+          userName: user?.displayName ?? "",
+          userEmail: user?.email ?? "",
+        });
         await logAction(user, {
           action: `Added ${payload.product}`,
           entity: "product",
@@ -382,7 +589,7 @@ export default function ProductsPage() {
       setProductForm(emptyProductForm);
       setEditingProduct(null);
     } catch {
-      setError("Unable to save product. Please try again.");
+      setProductError("Unable to save product. Please try again.");
     }
   };
 
@@ -405,10 +612,20 @@ export default function ProductsPage() {
   };
 
   const applyIncomingStock = async () => {
+    setIncomingError(null);
     if (!incomingProduct) return;
+    const incomingByTrimmed = incomingBy.trim();
     const qty = Number(incomingQty);
     if (!Number.isInteger(qty) || qty <= 0) {
-      setError("Incoming quantity must be a positive integer.");
+      setIncomingError("Incoming quantity must be a positive integer.");
+      return;
+    }
+    if (!incomingByTrimmed) {
+      setIncomingError(
+        incomingSource === "Restock"
+          ? "Restocked by is required."
+          : "Returned by is required.",
+      );
       return;
     }
     const updates =
@@ -416,6 +633,26 @@ export default function ProductsPage() {
         ? { totalQty: increment(qty), onhandQty: increment(qty) }
         : { onhandQty: increment(qty) };
     await updateDoc(doc(db, "products", incomingProduct.id), updates);
+    await addTransaction({
+      productId: incomingProduct.id,
+      productName: incomingProduct.product,
+      category: incomingProduct.category,
+      sku: incomingProduct.sku,
+      unit: incomingProduct.unit,
+      type:
+        incomingSource === "Restock"
+          ? "Incoming (Restock)"
+          : "Incoming (Return)",
+      qtyIn: qty,
+      qtyOut: 0,
+      balanceAfter: incomingProduct.onhandQty + qty,
+      reference: incomingSource,
+      source: incomingSource,
+      handledBy: incomingByTrimmed,
+      userId: user?.uid,
+      userName: user?.displayName ?? "",
+      userEmail: user?.email ?? "",
+    });
     await logAction(user, {
       action:
         incomingSource === "Restock"
@@ -424,15 +661,57 @@ export default function ProductsPage() {
       entity: "product",
       entityId: incomingProduct.id,
       entityName: incomingProduct.product,
-      details: { qty, source: incomingSource },
+      details: { qty, source: incomingSource, by: incomingByTrimmed },
     });
     setIncomingModalOpen(false);
   };
 
+  const applyOutgoingStock = async () => {
+    setOutgoingError(null);
+    if (!outgoingProduct) return;
+    const qty = Number(outgoingQty);
+    if (!Number.isInteger(qty) || qty <= 0) {
+      setOutgoingError("Outgoing quantity must be a positive integer.");
+      return;
+    }
+    if (qty > outgoingProduct.onhandQty) {
+      setOutgoingError("Outgoing quantity cannot exceed onhand quantity.");
+      return;
+    }
+    await updateDoc(doc(db, "products", outgoingProduct.id), {
+      onhandQty: increment(-qty),
+    });
+    await addTransaction({
+      productId: outgoingProduct.id,
+      productName: outgoingProduct.product,
+      category: outgoingProduct.category,
+      sku: outgoingProduct.sku,
+      unit: outgoingProduct.unit,
+      type: "Outgoing",
+      qtyIn: 0,
+      qtyOut: qty,
+      balanceAfter: outgoingProduct.onhandQty - qty,
+      reference: outgoingDestination,
+      destination: outgoingDestination,
+      userId: user?.uid,
+      userName: user?.displayName ?? "",
+      userEmail: user?.email ?? "",
+    });
+    await logAction(user, {
+      action: `Outgoing ${outgoingProduct.product}`,
+      entity: "product",
+      entityId: outgoingProduct.id,
+      entityName: outgoingProduct.product,
+      details: { qty, destination: outgoingDestination },
+    });
+    setOutgoingModalOpen(false);
+  };
+
   const saveCategory = async () => {
+    setCategoryError(null);
     const trimmedName = categoryName.trim();
     if (!trimmedName) {
-      setError("Category name is required.");
+      setCategoryError("Category name is required.");
       return;
     }
     try {
@@ -445,7 +724,82 @@ export default function ProductsPage() {
       setCategoryName("");
       setCategoryModalOpen(false);
     } catch {
-      setError("Unable to save category. Please try again.");
+      setCategoryError("Unable to save category. Please try again.");
+    }
+  };
+
+  useEffect(() => {
+    if (!ledgerOpen || !ledgerProduct) return;
+
+    const transactionsRef = collection(db, "transactions");
+    const transactionsQuery = query(
+      transactionsRef,
+      where("productId", "==", ledgerProduct.id),
+    );
+    const unsubscribe = onSnapshot(transactionsQuery, (snapshot) => {
+      const entries: Array<{
+        id: string;
+        type: string;
+        date: string;
+        qtyIn: number;
+        qtyOut: number;
+        balance?: number;
+        ref: string;
+        actor: string;
+      }> = [];
+      snapshot.docs.forEach((docSnap) => {
+        const data = docSnap.data() as {
+          type?: string;
+          date?: string;
+          qtyIn?: number;
+          qtyOut?: number;
+          balanceAfter?: number;
+          reference?: string;
+          handledBy?: string;
+        };
+        entries.push({
+          id: docSnap.id,
+          type: data.type ?? "",
+          date: data.date ?? "",
+          qtyIn: data.qtyIn ?? 0,
+          qtyOut: data.qtyOut ?? 0,
+          balance: data.balanceAfter,
+          ref: data.reference ?? "",
+          actor: getIncomingActor(
+            data.type ?? "",
+            data.reference ?? "",
+            data.handledBy,
+          ),
+        });
+      });
+
+      setLedgerEntries(entries);
+    });
+
+    return () => unsubscribe();
+  }, [ledgerOpen, ledgerProduct]);
+
+  const ledgerRows = useMemo(() => {
+    return [...ledgerEntries].sort((a, b) => b.date.localeCompare(a.date));
+  }, [ledgerEntries]);
+
+  const saveNotes = async () => {
+    if (!notesProduct) return;
+    setNotesError(null);
+    try {
+      await updateDoc(doc(db, "products", notesProduct.id), {
+        notes: notesDraft.trim(),
+      });
+      setNotesPreview(notesDraft.trim());
+      setNotesEditing(false);
+      await logAction(user, {
+        action: `Edited notes for ${notesProduct.product}`,
+        entity: "product",
+        entityId: notesProduct.id,
+        entityName: notesProduct.product,
+      });
+    } catch {
+      setNotesError("Unable to save notes. Please try again.");
     }
   };
 
@@ -562,8 +916,8 @@ export default function ProductsPage() {
         </div>
       )}
 
-      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="w-full">
+      <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="w-full overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
               <tr>
@@ -588,27 +942,22 @@ export default function ProductsPage() {
                 <th className="hidden px-4 py-3 md:table-cell">
                   Onhand Quantity
                 </th>
-                <th className="hidden px-4 py-3 md:table-cell">Unit Price</th>
-                <th className="hidden px-4 py-3 md:table-cell">
-                  Onhand Total
-                </th>
-                <th className="hidden px-4 py-3 md:table-cell">Total</th>
                 <th className="hidden px-4 py-3 md:table-cell">Actions</th>
-                <th className="px-4 py-3 text-right md:hidden">More</th>
+                <th className="px-4 py-3 pr-6 text-right md:hidden">More</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredProducts.length === 0 && (
                 <tr>
-                  <td
-                    colSpan={12}
-                    className="px-4 py-8 text-center text-sm text-slate-500"
-                  >
-                    No products found.
-                  </td>
+                    <td
+                      colSpan={9}
+                      className="px-4 py-8 text-center text-sm text-slate-500"
+                    >
+                      No products found.
+                    </td>
                 </tr>
               )}
-              {filteredProducts.map((row) => (
+              {pagedProducts.map((row) => (
                 <React.Fragment key={row.id}>
                   <tr
                     className={`transition hover:bg-slate-50 ${
@@ -628,7 +977,16 @@ export default function ProductsPage() {
                     <td className="px-4 py-3 font-medium text-slate-700">
                       {row.category}
                     </td>
-                    <td className="px-4 py-3 text-slate-700">{row.product}</td>
+                    <td className="px-4 py-3 text-slate-700">
+                      <button
+                        type="button"
+                        onClick={() => openLedger(row)}
+                        className="inline-flex items-center gap-2 rounded-lg border border-sky-200 px-3 py-1 text-sm font-semibold text-sky-700 transition hover:border-sky-400 hover:text-sky-800"
+                      >
+                        <span className="inline-flex">{LedgerIcon}</span>
+                        {row.product}
+                      </button>
+                    </td>
                     <td className="px-4 py-3 text-slate-500">{row.sku}</td>
                     <td className="hidden px-4 py-3 text-slate-500 md:table-cell">
                       {row.unit}
@@ -638,15 +996,6 @@ export default function ProductsPage() {
                     </td>
                     <td className="hidden px-4 py-3 text-slate-500 md:table-cell">
                       {row.onhandQty.toLocaleString()}
-                    </td>
-                    <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
-                      {formatCurrency(row.unitPrice)}
-                    </td>
-                    <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
-                      {formatCurrency(row.onhandQty * row.unitPrice)}
-                    </td>
-                    <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
-                      {formatCurrency(row.totalQty * row.unitPrice)}
                     </td>
                     <td className="hidden px-4 py-3 md:table-cell">
                       <button
@@ -661,7 +1010,12 @@ export default function ProductsPage() {
                       <button
                         type="button"
                         onClick={() => {
-                          setNotesPreview(row.notes?.trim() || "No notes added.");
+                          setNotesError(null);
+                          setNotesProduct(row);
+                          const initialNotes = row.notes?.trim() ?? "";
+                          setNotesPreview(initialNotes);
+                          setNotesDraft(initialNotes);
+                          setNotesEditing(false);
                           setNotesModalOpen(true);
                         }}
                         className={`${iconButton} ml-2`}
@@ -679,8 +1033,17 @@ export default function ProductsPage() {
                       >
                         {IncomingIcon}
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => handleStockCardPdf(row)}
+                        className={`${iconButton} ml-2`}
+                        aria-label="Save stock card as PDF"
+                        title="Save PDF"
+                      >
+                        {PdfIcon}
+                      </button>
                     </td>
-                    <td className="px-4 py-3 text-right md:hidden">
+                    <td className="px-4 py-3 pr-6 text-right md:hidden">
                       <button
                         type="button"
                         onClick={() =>
@@ -697,7 +1060,7 @@ export default function ProductsPage() {
                   </tr>
                   {expandedRows[row.id] && (
                     <tr className="md:hidden">
-                      <td colSpan={12} className="px-4 pb-4">
+                      <td colSpan={9} className="px-4 pb-4">
                         <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
                           <div className="flex items-center justify-between">
                             <span className="text-xs font-semibold uppercase text-slate-500">
@@ -717,28 +1080,6 @@ export default function ProductsPage() {
                             </span>
                             <span>{row.onhandQty.toLocaleString()}</span>
                           </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold uppercase text-slate-500">
-                              Unit Price
-                            </span>
-                            <span>{formatCurrency(row.unitPrice)}</span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold uppercase text-slate-500">
-                              Onhand Total
-                            </span>
-                            <span>
-                              {formatCurrency(row.onhandQty * row.unitPrice)}
-                            </span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold uppercase text-slate-500">
-                              Total
-                            </span>
-                            <span>
-                              {formatCurrency(row.totalQty * row.unitPrice)}
-                            </span>
-                          </div>
                           <div className="flex items-center gap-2 pt-2">
                             <button
                               type="button"
@@ -752,9 +1093,12 @@ export default function ProductsPage() {
                             <button
                               type="button"
                               onClick={() => {
-                                setNotesPreview(
-                                  row.notes?.trim() || "No notes added.",
-                                );
+                                setNotesError(null);
+                                setNotesProduct(row);
+                                const initialNotes = row.notes?.trim() ?? "";
+                                setNotesPreview(initialNotes);
+                                setNotesDraft(initialNotes);
+                                setNotesEditing(false);
                                 setNotesModalOpen(true);
                               }}
                               className={iconButton}
@@ -772,6 +1116,15 @@ export default function ProductsPage() {
                             >
                               {IncomingIcon}
                             </button>
+                            <button
+                              type="button"
+                              onClick={() => handleStockCardPdf(row)}
+                              className={iconButton}
+                              aria-label="Save stock card as PDF"
+                              title="Save PDF"
+                            >
+                              {PdfIcon}
+                            </button>
                           </div>
                         </div>
                       </td>
@@ -783,13 +1136,21 @@ export default function ProductsPage() {
           </table>
         </div>
       </div>
+      <TablePagination
+        total={filteredProducts.length}
+        page={productPage}
+        pageSize={pageSize}
+        showAll={productShowAll}
+        onPageChange={setProductPage}
+        onToggleShowAll={() => setProductShowAll((prev) => !prev)}
+      />
 
       <Modal
         title={editingProduct ? "Edit Product" : "New Product"}
         open={productModalOpen}
         onClose={() => {
           setProductModalOpen(false);
-          setError(null);
+          setProductError(null);
         }}
       >
         <form
@@ -870,28 +1231,15 @@ export default function ProductsPage() {
               onChange={(event) =>
                 setProductForm((prev) => ({
                   ...prev,
-                  quantity: event.target.value,
+                  quantity: clampQtyInput(event.target.value),
                 }))
               }
+              min={0}
               className={`mt-2 w-full rounded-xl border px-3 py-2 text-sm ${
                 editingProduct
                   ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-500"
                   : "border-slate-200"
               }`}
-            />
-          </label>
-          <label className="text-sm font-medium text-slate-700">
-            Unit Price
-            <input
-              type="number"
-              value={productForm.unitPrice}
-              onChange={(event) =>
-                setProductForm((prev) => ({
-                  ...prev,
-                  unitPrice: event.target.value,
-                }))
-              }
-              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
             />
           </label>
           <label className="text-sm font-medium text-slate-700 md:col-span-2">
@@ -907,9 +1255,9 @@ export default function ProductsPage() {
               className="mt-2 min-h-[100px] w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
             />
           </label>
-          {error && (
+          {productError && (
             <p className="md:col-span-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
-              {error}
+              {productError}
             </p>
           )}
           <div className="md:col-span-2 flex flex-wrap justify-end gap-3 pt-2">
@@ -933,10 +1281,43 @@ export default function ProductsPage() {
       <Modal
         title="Product Notes"
         open={notesModalOpen}
-        onClose={() => setNotesModalOpen(false)}
+        onClose={() => {
+          setNotesModalOpen(false);
+          setNotesEditing(false);
+          setNotesError(null);
+        }}
       >
-        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700">
-          {notesPreview}
+        <div className="space-y-4">
+          <textarea
+            value={notesEditing ? notesDraft : notesPreview}
+            onChange={(event) => setNotesDraft(event.target.value)}
+            readOnly={!notesEditing}
+            className={`min-h-[120px] w-full rounded-xl border px-4 py-3 text-sm ${
+              notesEditing
+                ? "border-slate-200 bg-white text-slate-700"
+                : "border-slate-200 bg-slate-50 text-slate-700"
+            }`}
+          />
+          {notesError && (
+            <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+              {notesError}
+            </p>
+          )}
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => {
+                if (notesEditing) {
+                  void saveNotes();
+                  return;
+                }
+                setNotesEditing(true);
+              }}
+              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+            >
+              {notesEditing ? "Save" : "Edit"}
+            </button>
+          </div>
         </div>
       </Modal>
 
@@ -966,7 +1347,8 @@ export default function ProductsPage() {
             <input
               type="number"
               value={incomingQty}
-              onChange={(event) => setIncomingQty(event.target.value)}
+              onChange={(event) => setIncomingQty(clampQtyInput(event.target.value))}
+              min={0}
               className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
             />
           </label>
@@ -981,6 +1363,15 @@ export default function ProductsPage() {
               <option value="Returns">Returns</option>
             </select>
           </label>
+          <label className="block text-sm font-medium text-slate-700">
+            {incomingSource === "Restock" ? "Restocked by" : "Returned by"}
+            <input
+              type="text"
+              value={incomingBy}
+              onChange={(event) => setIncomingBy(event.target.value)}
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            />
+          </label>
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
             <p className="font-semibold">How this affects quantities</p>
             <p className="mt-1">
@@ -988,9 +1379,9 @@ export default function ProductsPage() {
             </p>
             <p>Returns increase Onhand only (Total stays the same).</p>
           </div>
-          {error && (
+          {incomingError && (
             <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
-              {error}
+              {incomingError}
             </p>
           )}
           <div className="flex flex-wrap justify-end gap-3">
@@ -1009,6 +1400,122 @@ export default function ProductsPage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      <Modal
+        title="Outgoing Stocks"
+        open={outgoingModalOpen}
+        onClose={() => setOutgoingModalOpen(false)}
+      >
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            applyOutgoingStock();
+          }}
+        >
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+            <p className="font-semibold text-slate-900">
+              {outgoingProduct?.product ?? "Selected product"}
+            </p>
+            <p className="text-xs text-slate-500">
+              Current Onhand: {outgoingProduct?.onhandQty ?? 0}
+            </p>
+          </div>
+          <label className="block text-sm font-medium text-slate-700">
+            QTY
+            <input
+              type="number"
+              value={outgoingQty}
+              onChange={(event) => setOutgoingQty(clampQtyInput(event.target.value))}
+              min={0}
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            />
+          </label>
+          <label className="block text-sm font-medium text-slate-700">
+            Destination
+            <select
+              value={outgoingDestination}
+              onChange={(event) => setOutgoingDestination(event.target.value)}
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            >
+              <option value="Sale">Sale</option>
+              <option value="Others">Others</option>
+            </select>
+          </label>
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+            <p className="font-semibold">How this affects quantities</p>
+            <p className="mt-1">Outgoing reduces Onhand quantity only.</p>
+          </div>
+          {outgoingError && (
+            <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+              {outgoingError}
+            </p>
+          )}
+          <div className="flex flex-wrap justify-end gap-3">
+            <button
+              type="button"
+              onClick={() => setOutgoingModalOpen(false)}
+              className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+            >
+              Save
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        title={`Product Card (${ledgerProduct?.product ?? ""})`}
+        open={ledgerOpen}
+        onClose={() => setLedgerOpen(false)}
+      >
+        <div className="space-y-3">
+          {ledgerEntries.length === 0 && (
+            <p className="text-sm text-slate-500">No ledger entries yet.</p>
+          )}
+          <div className="overflow-hidden rounded-xl border border-slate-200">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">Date</th>
+                  <th className="px-3 py-2">Type</th>
+                  <th className="px-3 py-2 text-right">In</th>
+                  <th className="px-3 py-2 text-right">Out</th>
+                  <th className="px-3 py-2 text-right">Balance</th>
+                  <th className="px-3 py-2">Restocked/Returned by</th>
+                  <th className="px-3 py-2">Reference</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {ledgerRows.map((entry) => (
+                  <tr key={entry.id}>
+                    <td className="px-3 py-2 text-slate-600">{entry.date}</td>
+                    <td className="px-3 py-2 text-slate-700">{entry.type}</td>
+                    <td className="px-3 py-2 text-right text-emerald-600">
+                      {entry.qtyIn || ""}
+                    </td>
+                    <td className="px-3 py-2 text-right text-rose-600">
+                      {entry.qtyOut || ""}
+                    </td>
+                    <td className="px-3 py-2 text-right text-slate-700">
+                      {entry.balance ?? "-"}
+                    </td>
+                    <td className="px-3 py-2 text-slate-600">
+                      {entry.actor || "-"}
+                    </td>
+                    <td className="px-3 py-2 text-slate-500">{entry.ref}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </Modal>
 
       <Modal
@@ -1046,7 +1553,7 @@ export default function ProductsPage() {
         open={categoryModalOpen}
         onClose={() => {
           setCategoryModalOpen(false);
-          setError(null);
+          setCategoryError(null);
         }}
       >
         <form
@@ -1065,9 +1572,9 @@ export default function ProductsPage() {
               className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
             />
           </label>
-          {error && (
+          {categoryError && (
             <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
-              {error}
+              {categoryError}
             </p>
           )}
           <div className="flex flex-wrap justify-end gap-3">

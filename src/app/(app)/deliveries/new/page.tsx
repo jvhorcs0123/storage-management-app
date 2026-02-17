@@ -1,32 +1,25 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  addDoc,
   collection,
   doc,
   getDocs,
   serverTimestamp,
+  setDoc,
   writeBatch,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/components/AuthProvider";
 import { logAction } from "@/lib/logs";
-
-type CustomerRow = {
-  id: string;
-  name: string;
-  address: string;
-  contactNo: string;
-};
+import { addTransaction } from "@/lib/transactions";
 
 type ProductRow = {
   id: string;
   category: string;
   product: string;
   unit: string;
-  unitPrice: number;
   onhandQty: number;
 };
 
@@ -36,9 +29,10 @@ type DeliveryItem = {
   productName: string;
   category: string;
   unit: string;
-  price: number;
   quantity: number;
 };
+
+type DeliveryStatus = "Draft" | "Closed";
 
 const iconBase = "h-4 w-4";
 const iconButton =
@@ -78,30 +72,21 @@ const TrashIcon = (
   </svg>
 );
 
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-PH", {
-    style: "currency",
-    currency: "PHP",
-    currencyDisplay: "narrowSymbol",
-  }).format(value);
-}
-
-function generateDrNo(year: string, series: number) {
+function generateRefNo(year: string, series: number) {
   const padded = String(series).padStart(4, "0");
-  return `DR-ZK-${year}-${padded}`;
+  return `REFNO-OUT-${year}-${padded}`;
 }
 
 export default function NewDeliveryPage() {
   const { user, loading } = useAuth();
   const router = useRouter();
-  const [customers, setCustomers] = useState<CustomerRow[]>([]);
   const [products, setProducts] = useState<ProductRow[]>([]);
   const [deliveryItems, setDeliveryItems] = useState<DeliveryItem[]>([]);
-  const [drNo, setDrNo] = useState("");
-  const [deliveryDate, setDeliveryDate] = useState("");
-  const [customerId, setCustomerId] = useState("");
-  const [address, setAddress] = useState("");
-  const [contactNo, setContactNo] = useState("");
+  const [referenceNo, setReferenceNo] = useState("");
+  const [outboundType, setOutboundType] = useState("Trucking");
+  const [receiver, setReceiver] = useState("Cashier");
+  const [receiverName, setReceiverName] = useState("");
+  const [dateTime, setDateTime] = useState("");
   const [itemModalOpen, setItemModalOpen] = useState(false);
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [itemProductId, setItemProductId] = useState("");
@@ -109,20 +94,21 @@ export default function NewDeliveryPage() {
   const [itemError, setItemError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
+  const [showSaveHelp, setShowSaveHelp] = useState(false);
+  const [confirmFinalizeOpen, setConfirmFinalizeOpen] = useState(false);
+
+  const clampQtyInput = (value: string) => {
+    if (!value.trim()) return "";
+    const next = Math.floor(Number(value));
+    if (Number.isNaN(next)) return "";
+    return String(Math.max(0, next));
+  };
 
   useEffect(() => {
     if (!user) return;
     const loadData = async () => {
-      const customerSnap = await getDocs(collection(db, "customers"));
       const productSnap = await getDocs(collection(db, "products"));
       const deliverySnap = await getDocs(collection(db, "deliveries"));
-
-      const customerRows = customerSnap.docs.map((docSnap) => ({
-        id: docSnap.id,
-        ...(docSnap.data() as Omit<CustomerRow, "id">),
-      }));
-      customerRows.sort((a, b) => a.name.localeCompare(b.name));
-      setCustomers(customerRows);
 
       const productRows = productSnap.docs.map((docSnap) => ({
         id: docSnap.id,
@@ -134,26 +120,17 @@ export default function NewDeliveryPage() {
       const year = new Date().getFullYear().toString().slice(-2);
       let maxSeries = 0;
       deliverySnap.docs.forEach((docSnap) => {
-        const data = docSnap.data() as { drYear?: string; series?: number };
-        if (data.drYear === year && typeof data.series === "number") {
+        const data = docSnap.data() as { outYear?: string; series?: number };
+        if (data.outYear === year && typeof data.series === "number") {
           maxSeries = Math.max(maxSeries, data.series);
         }
       });
-      setDrNo(generateDrNo(year, maxSeries + 1));
+      setReferenceNo(generateRefNo(year, maxSeries + 1));
+      const now = new Date();
+      setDateTime(now.toISOString().slice(0, 16));
     };
     loadData();
   }, [user]);
-
-  useEffect(() => {
-    const selected = customers.find((customer) => customer.id === customerId);
-    if (selected) {
-      setAddress(selected.address);
-      setContactNo(selected.contactNo);
-    } else {
-      setAddress("");
-      setContactNo("");
-    }
-  }, [customerId, customers]);
 
   const selectedProduct = useMemo(
     () => products.find((product) => product.id === itemProductId),
@@ -189,12 +166,9 @@ export default function NewDeliveryPage() {
     }
 
     const existing = deliveryItems.find((item) => item.id === editingItemId);
-    const available =
-      selectedProduct.onhandQty + (existing?.quantity ?? 0);
+    const available = selectedProduct.onhandQty + (existing?.quantity ?? 0);
     if (qty > available) {
-      setItemError(
-        `Quantity exceeds onhand (${selectedProduct.onhandQty}).`,
-      );
+      setItemError(`Quantity exceeds onhand (${selectedProduct.onhandQty}).`);
       return;
     }
 
@@ -204,7 +178,6 @@ export default function NewDeliveryPage() {
       productName: selectedProduct.product,
       category: selectedProduct.category,
       unit: selectedProduct.unit,
-      price: selectedProduct.unitPrice,
       quantity: qty,
     };
 
@@ -216,7 +189,7 @@ export default function NewDeliveryPage() {
     });
     logAction(user, {
       action: `${editingItemId ? "Edited" : "Added"} ${nextItem.productName}`,
-      entity: "deliveryItem",
+      entity: "outboundItem",
       entityId: nextItem.productId,
       entityName: nextItem.productName,
     });
@@ -229,7 +202,7 @@ export default function NewDeliveryPage() {
       if (removed) {
         logAction(user, {
           action: `Deleted ${removed.productName}`,
-          entity: "deliveryItem",
+          entity: "outboundItem",
           entityId: removed.productId,
           entityName: removed.productName,
         });
@@ -238,58 +211,104 @@ export default function NewDeliveryPage() {
     });
   };
 
-  const saveDelivery = async () => {
+  const validateOutboundForm = () => {
     setFormError(null);
-    if (!drNo || !customerId || !deliveryDate) {
-      setFormError("DR No., customer, and delivery date are required.");
-      return;
+    if (!referenceNo || !outboundType || !receiver || !receiverName || !dateTime) {
+      setFormError("Type, receiver, name, and date/time are required.");
+      return false;
     }
     if (deliveryItems.length === 0) {
       setFormError("Please add at least one item.");
-      return;
+      return false;
     }
+    return true;
+  };
 
-    const customer = customers.find((item) => item.id === customerId);
-    if (!customer) {
-      setFormError("Customer selection is invalid.");
-      return;
-    }
+  const saveOutbound = async (status: DeliveryStatus) => {
+    if (!validateOutboundForm()) return;
 
     const year = new Date().getFullYear().toString().slice(-2);
-    const series = Number(drNo.split("-").pop());
-    const batch = writeBatch(db);
-    const deliveryRef = doc(collection(db, "deliveries"));
+    const series = Number(referenceNo.split("-").pop());
+    const outboundRef = doc(collection(db, "deliveries"));
 
-    deliveryItems.forEach((item) => {
-      const product = products.find((row) => row.id === item.productId);
-      if (!product) return;
-      batch.update(doc(db, "products", product.id), {
-        onhandQty: product.onhandQty - item.quantity,
+    if (status === "Closed") {
+      const batch = writeBatch(db);
+      deliveryItems.forEach((item) => {
+        const product = products.find((row) => row.id === item.productId);
+        if (!product) return;
+        batch.update(doc(db, "products", product.id), {
+          onhandQty: product.onhandQty - item.quantity,
+        });
       });
-    });
 
-    batch.set(deliveryRef, {
-      drNo,
-      drYear: year,
-      series,
-      drDate: deliveryDate,
-      status: "Open",
-      customerId: customer.id,
-      customerName: customer.name,
-      address: customer.address,
-      contactNo: customer.contactNo,
-      items: deliveryItems,
-      createdAt: serverTimestamp(),
-    });
+      batch.set(outboundRef, {
+        referenceNo,
+        outYear: year,
+        series,
+        outboundType,
+        receiver,
+        receiverName,
+        dateTime,
+        items: deliveryItems,
+        status,
+        createdAt: serverTimestamp(),
+      });
 
-    await batch.commit();
-    await logAction(user, {
-      action: `Added ${drNo}`,
-      entity: "delivery",
-      entityId: deliveryRef.id,
-      entityName: drNo,
-    });
+      await batch.commit();
+      for (const item of deliveryItems) {
+        const product = products.find((row) => row.id === item.productId);
+        if (!product) continue;
+        const nextOnhand = product.onhandQty - item.quantity;
+        await addTransaction({
+          productId: item.productId,
+          productName: item.productName,
+          category: item.category,
+          unit: item.unit,
+          type: `Outgoing (${outboundType})`,
+          qtyIn: 0,
+          qtyOut: item.quantity,
+          balanceAfter: nextOnhand,
+          reference: referenceNo,
+          destination: receiver,
+          receiverName,
+          date: dateTime.slice(0, 10),
+          userId: user?.uid,
+          userName: user?.displayName ?? "",
+          userEmail: user?.email ?? "",
+        });
+      }
+      await logAction(user, {
+        action: `Added ${referenceNo}`,
+        entity: "outbound",
+        entityId: outboundRef.id,
+        entityName: referenceNo,
+      });
+    } else {
+      await setDoc(outboundRef, {
+        referenceNo,
+        outYear: year,
+        series,
+        outboundType,
+        receiver,
+        receiverName,
+        dateTime,
+        items: deliveryItems,
+        status,
+        createdAt: serverTimestamp(),
+      });
+      await logAction(user, {
+        action: `Saved draft ${referenceNo}`,
+        entity: "outbound",
+        entityId: outboundRef.id,
+        entityName: referenceNo,
+      });
+    }
     router.push("/deliveries");
+  };
+
+  const requestFinalize = () => {
+    if (!validateOutboundForm()) return;
+    setConfirmFinalizeOpen(true);
   };
 
   if (loading) {
@@ -303,7 +322,7 @@ export default function NewDeliveryPage() {
   if (!user) {
     return (
       <div className="rounded-2xl border border-slate-200 bg-white px-4 py-6 text-sm text-slate-600 shadow-sm">
-        Please sign in to create deliveries.
+        Please sign in to create outbound records.
       </div>
     );
   }
@@ -312,61 +331,64 @@ export default function NewDeliveryPage() {
     <section className="space-y-6">
       <div>
         <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-          Deliveries
+          Outbound
         </p>
-        <h1 className="text-2xl font-semibold text-slate-900">New DR</h1>
+        <h1 className="text-2xl font-semibold text-slate-900">New Outbound</h1>
       </div>
 
       <div className="grid gap-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:grid-cols-2">
         <label className="text-sm font-medium text-slate-700">
-          DR No.
+          Reference No.
           <input
             type="text"
-            value={drNo}
+            value={referenceNo}
             readOnly
             className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
           />
         </label>
         <label className="text-sm font-medium text-slate-700">
-          Delivery Date
+          Date & Time
           <input
-            type="date"
-            value={deliveryDate}
-            onChange={(event) => setDeliveryDate(event.target.value)}
+            type="datetime-local"
+            value={dateTime}
+            onChange={(event) => setDateTime(event.target.value)}
             className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
           />
         </label>
-        <label className="text-sm font-medium text-slate-700 md:col-span-2">
-          Customer Name
+        <label className="text-sm font-medium text-slate-700">
+          Type
           <select
-            value={customerId}
-            onChange={(event) => setCustomerId(event.target.value)}
+            value={outboundType}
+            onChange={(event) => setOutboundType(event.target.value)}
             className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
           >
-            <option value="">Select customer</option>
-            {customers.map((customer) => (
-              <option key={customer.id} value={customer.id}>
-                {customer.name}
-              </option>
-            ))}
+            <option value="Trucking">Trucking</option>
+            <option value="Display">Display</option>
+            <option value="Wholesale">Wholesale</option>
+            <option value="Jentech">Jentech</option>
+            <option value="Others">Others</option>
           </select>
         </label>
         <label className="text-sm font-medium text-slate-700">
-          Address
-          <input
-            type="text"
-            value={address}
-            readOnly
-            className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
-          />
+          Receiver
+          <select
+            value={receiver}
+            onChange={(event) => setReceiver(event.target.value)}
+            className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+          >
+            <option value="Cashier">Cashier</option>
+            <option value="Agent">Agent</option>
+            <option value="Store Assistant">Store Assistant</option>
+            <option value="Others">Others</option>
+          </select>
         </label>
-        <label className="text-sm font-medium text-slate-700">
-          Contact No.
+        <label className="text-sm font-medium text-slate-700 md:col-span-2">
+          Receiver Name
           <input
             type="text"
-            value={contactNo}
-            readOnly
-            className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
+            value={receiverName}
+            onChange={(event) => setReceiverName(event.target.value)}
+            className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
           />
         </label>
       </div>
@@ -385,7 +407,6 @@ export default function NewDeliveryPage() {
                 <th className="px-4 py-3">Product</th>
                 <th className="hidden px-4 py-3 md:table-cell">Quantity</th>
                 <th className="hidden px-4 py-3 md:table-cell">UoM</th>
-                <th className="hidden px-4 py-3 md:table-cell">Price</th>
                 <th className="hidden px-4 py-3 md:table-cell">Actions</th>
                 <th className="px-4 py-3 text-right md:hidden">More</th>
               </tr>
@@ -394,7 +415,7 @@ export default function NewDeliveryPage() {
               {deliveryItems.length === 0 && (
                 <tr>
                   <td
-                    colSpan={7}
+                    colSpan={6}
                     className="px-4 py-6 text-center text-sm text-slate-500"
                   >
                     No items yet.
@@ -402,7 +423,7 @@ export default function NewDeliveryPage() {
                 </tr>
               )}
               {deliveryItems.map((item) => (
-                <>
+                <Fragment key={item.id}>
                   <tr key={item.id} className="hover:bg-slate-50">
                     <td className="px-4 py-3 text-slate-700">{item.category}</td>
                     <td className="px-4 py-3 text-slate-700">
@@ -413,9 +434,6 @@ export default function NewDeliveryPage() {
                     </td>
                     <td className="hidden px-4 py-3 text-slate-600 md:table-cell">
                       {item.unit}
-                    </td>
-                    <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
-                      {formatCurrency(item.price)}
                     </td>
                     <td className="hidden px-4 py-3 md:table-cell">
                       <button
@@ -454,7 +472,7 @@ export default function NewDeliveryPage() {
                   </tr>
                   {expandedItems[item.id] && (
                     <tr className="md:hidden">
-                      <td colSpan={7} className="px-4 pb-4">
+                      <td colSpan={6} className="px-4 pb-4">
                         <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
                           <div className="flex items-center justify-between">
                             <span className="text-xs font-semibold uppercase text-slate-500">
@@ -467,12 +485,6 @@ export default function NewDeliveryPage() {
                               UoM
                             </span>
                             <span>{item.unit}</span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold uppercase text-slate-500">
-                              Price
-                            </span>
-                            <span>{formatCurrency(item.price)}</span>
                           </div>
                           <div className="flex items-center gap-2 pt-2">
                             <button
@@ -498,20 +510,11 @@ export default function NewDeliveryPage() {
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               ))}
             </tbody>
           </table>
         </div>
-      </div>
-      <div className="flex justify-end rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm">
-        Subtotal:&nbsp;
-        {formatCurrency(
-          deliveryItems.reduce(
-            (total, item) => total + item.price * item.quantity,
-            0,
-          ),
-        )}
       </div>
 
       {formError && (
@@ -531,16 +534,26 @@ export default function NewDeliveryPage() {
         </button>
         <button
           type="button"
-          onClick={saveDelivery}
+          onClick={() => saveOutbound("Draft")}
+          className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+        >
+          Save as Draft
+        </button>
+        <button
+          type="button"
+          onClick={requestFinalize}
           className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
         >
           Save
         </button>
         <button
           type="button"
-          className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+          onClick={() => setShowSaveHelp((prev) => !prev)}
+          className="rounded-full border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-semibold text-sky-700 shadow-sm hover:border-sky-300 hover:text-sky-800"
+          aria-label="Explain save options"
+          title="Explain save options"
         >
-          Close
+          ?
         </button>
         <button
           type="button"
@@ -550,6 +563,19 @@ export default function NewDeliveryPage() {
           Cancel
         </button>
       </div>
+      {showSaveHelp && (
+        <div className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-700">
+          <p className="font-semibold text-sky-800">Save vs Save as Draft</p>
+          <p className="mt-1">
+            Save finalizes the outbound record, updates onhand quantity, and
+            locks it from further edits.
+          </p>
+          <p className="mt-1">
+            Save as Draft keeps it editable and does not affect stock or
+            transaction history until you save it.
+          </p>
+        </div>
+      )}
 
       {itemModalOpen && (
         <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-3 sm:p-4 md:items-center md:p-6">
@@ -608,24 +634,12 @@ export default function NewDeliveryPage() {
                   />
                 </label>
                 <label className="text-sm font-medium text-slate-700">
-                  Price
-                  <input
-                    type="text"
-                    readOnly
-                    value={
-                      selectedProduct
-                        ? formatCurrency(selectedProduct.unitPrice)
-                        : ""
-                    }
-                    className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600"
-                  />
-                </label>
-                <label className="text-sm font-medium text-slate-700">
                   Quantity
                   <input
                     type="number"
                     value={itemQuantity}
-                    onChange={(event) => setItemQuantity(event.target.value)}
+                    onChange={(event) => setItemQuantity(clampQtyInput(event.target.value))}
+                    min={0}
                     className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
                   />
                 </label>
@@ -656,6 +670,44 @@ export default function NewDeliveryPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {confirmFinalizeOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-slate-950/60"
+            onClick={() => setConfirmFinalizeOpen(false)}
+            aria-label="Close confirmation"
+          />
+          <div className="relative w-full max-w-lg rounded-2xl bg-white p-6 text-slate-900 shadow-xl">
+            <h2 className="text-lg font-semibold">Confirm Save</h2>
+            <p className="mt-2 text-sm text-slate-600">
+              If you confirm, this outbound will be finalized. Product onhand
+              quantities will be deducted, transaction history will be created, and
+              this record will be locked from further edits.
+            </p>
+            <div className="mt-6 flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setConfirmFinalizeOpen(false)}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  setConfirmFinalizeOpen(false);
+                  await saveOutbound("Closed");
+                }}
+                className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+              >
+                Confirm and Save
+              </button>
+            </div>
           </div>
         </div>
       )}

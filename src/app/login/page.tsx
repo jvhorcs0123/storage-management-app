@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Image from "next/image";
 import { signInWithEmailAndPassword } from "firebase/auth";
 import { useRouter } from "next/navigation";
 import { auth } from "@/lib/firebase";
@@ -86,12 +87,16 @@ export default function LoginPage() {
       <div className="mx-auto flex min-h-screen max-w-6xl items-center px-6">
         <div className="grid w-full gap-8 lg:grid-cols-[1.2fr_1fr]">
           <div className="hidden flex-col justify-center gap-6 rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-950 to-black p-10 text-slate-200 shadow-xl lg:flex">
-            <p className="text-xs font-semibold uppercase tracking-[0.4em] text-slate-400">
-              Storage Office
+            <p className="inline-flex items-center gap-2 text-3xl font-semibold leading-tight text-white">
+              <Image
+                src="/branding_logo.png"
+                alt="3 Degrees logo"
+                width={200}
+                height={200}
+                className="h-[150px] w-[150px] rounded-sm"
+              />
+                Storage Management System
             </p>
-            <h1 className="text-3xl font-semibold leading-tight text-white">
-              Product & Storage Management System
-            </h1>
             <p className="text-sm text-slate-400">
               Track products, deliveries, and storage inventory with a clean
               operational dashboard.
