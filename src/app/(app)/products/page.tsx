@@ -432,10 +432,11 @@ export default function ProductsPage() {
     setLedgerOpen(true);
   };
 
-  const getIncomingActor = (type: string, ref: string) => {
+  const getIncomingActor = (type: string, ref: string, handledBy?: string) => {
     const isIncoming =
       type === "Incoming (Restock)" || type === "Incoming (Return)";
     if (!isIncoming) return "";
+    if (handledBy?.trim()) return handledBy.trim();
     const parts = ref.split(" - ");
     if (parts.length < 2) return "";
     return parts.slice(1).join(" - ").trim();
@@ -456,6 +457,7 @@ export default function ProductsPage() {
         qtyOut?: number;
         balanceAfter?: number;
         reference?: string;
+        handledBy?: string;
       };
       return {
         id: docSnap.id,
@@ -465,7 +467,11 @@ export default function ProductsPage() {
         qtyOut: data.qtyOut ?? 0,
         balance: data.balanceAfter,
         ref: data.reference ?? "",
-        actor: getIncomingActor(data.type ?? "", data.reference ?? ""),
+        actor: getIncomingActor(
+          data.type ?? "",
+          data.reference ?? "",
+          data.handledBy,
+        ),
       };
     });
     entries.sort((a, b) => b.date.localeCompare(a.date));
@@ -640,8 +646,9 @@ export default function ProductsPage() {
       qtyIn: qty,
       qtyOut: 0,
       balanceAfter: incomingProduct.onhandQty + qty,
-      reference: `${incomingSource} - ${incomingByTrimmed}`,
+      reference: incomingSource,
       source: incomingSource,
+      handledBy: incomingByTrimmed,
       userId: user?.uid,
       userName: user?.displayName ?? "",
       userEmail: user?.email ?? "",
@@ -748,6 +755,7 @@ export default function ProductsPage() {
           qtyOut?: number;
           balanceAfter?: number;
           reference?: string;
+          handledBy?: string;
         };
         entries.push({
           id: docSnap.id,
@@ -757,7 +765,11 @@ export default function ProductsPage() {
           qtyOut: data.qtyOut ?? 0,
           balance: data.balanceAfter,
           ref: data.reference ?? "",
-          actor: getIncomingActor(data.type ?? "", data.reference ?? ""),
+          actor: getIncomingActor(
+            data.type ?? "",
+            data.reference ?? "",
+            data.handledBy,
+          ),
         });
       });
 

@@ -133,7 +133,7 @@ export default function Sidebar({
               alt="3 Degrees logo"
               width={20}
               height={20}
-              className="h-5 w-5 rounded-sm"
+              className="h-10 w-10 rounded-sm"
             />
             Storage
           </div>

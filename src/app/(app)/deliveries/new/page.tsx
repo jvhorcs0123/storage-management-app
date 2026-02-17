@@ -95,6 +95,7 @@ export default function NewDeliveryPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
   const [showSaveHelp, setShowSaveHelp] = useState(false);
+  const [confirmFinalizeOpen, setConfirmFinalizeOpen] = useState(false);
 
   const clampQtyInput = (value: string) => {
     if (!value.trim()) return "";
@@ -210,16 +211,21 @@ export default function NewDeliveryPage() {
     });
   };
 
-  const saveOutbound = async (status: DeliveryStatus) => {
+  const validateOutboundForm = () => {
     setFormError(null);
     if (!referenceNo || !outboundType || !receiver || !receiverName || !dateTime) {
       setFormError("Type, receiver, name, and date/time are required.");
-      return;
+      return false;
     }
     if (deliveryItems.length === 0) {
       setFormError("Please add at least one item.");
-      return;
+      return false;
     }
+    return true;
+  };
+
+  const saveOutbound = async (status: DeliveryStatus) => {
+    if (!validateOutboundForm()) return;
 
     const year = new Date().getFullYear().toString().slice(-2);
     const series = Number(referenceNo.split("-").pop());
@@ -264,6 +270,7 @@ export default function NewDeliveryPage() {
           balanceAfter: nextOnhand,
           reference: referenceNo,
           destination: receiver,
+          receiverName,
           date: dateTime.slice(0, 10),
           userId: user?.uid,
           userName: user?.displayName ?? "",
@@ -297,6 +304,11 @@ export default function NewDeliveryPage() {
       });
     }
     router.push("/deliveries");
+  };
+
+  const requestFinalize = () => {
+    if (!validateOutboundForm()) return;
+    setConfirmFinalizeOpen(true);
   };
 
   if (loading) {
@@ -529,7 +541,7 @@ export default function NewDeliveryPage() {
         </button>
         <button
           type="button"
-          onClick={() => saveOutbound("Closed")}
+          onClick={requestFinalize}
           className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
         >
           Save
@@ -658,6 +670,44 @@ export default function NewDeliveryPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {confirmFinalizeOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-slate-950/60"
+            onClick={() => setConfirmFinalizeOpen(false)}
+            aria-label="Close confirmation"
+          />
+          <div className="relative w-full max-w-lg rounded-2xl bg-white p-6 text-slate-900 shadow-xl">
+            <h2 className="text-lg font-semibold">Confirm Save</h2>
+            <p className="mt-2 text-sm text-slate-600">
+              If you confirm, this outbound will be finalized. Product onhand
+              quantities will be deducted, transaction history will be created, and
+              this record will be locked from further edits.
+            </p>
+            <div className="mt-6 flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setConfirmFinalizeOpen(false)}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  setConfirmFinalizeOpen(false);
+                  await saveOutbound("Closed");
+                }}
+                className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+              >
+                Confirm and Save
+              </button>
+            </div>
           </div>
         </div>
       )}

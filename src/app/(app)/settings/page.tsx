@@ -38,6 +38,8 @@ type TransactionRow = {
   qtyOut: number;
   date: string;
   ref: string;
+  receiverName: string;
+  handledBy: string;
   balance?: number;
 };
 
@@ -167,6 +169,8 @@ export default function SettingsPage() {
           qtyOut?: number;
           date?: string;
           reference?: string;
+          receiverName?: string;
+          handledBy?: string;
           balanceAfter?: number | null;
           createdAt?: { toDate: () => Date };
         };
@@ -183,6 +187,12 @@ export default function SettingsPage() {
           qtyOut: data.qtyOut ?? 0,
           date: data.date ?? (createdAt ? createdAt.toISOString().slice(0, 10) : ""),
           ref: data.reference ?? "",
+          receiverName: data.receiverName ?? "",
+          handledBy: getIncomingHandledBy(
+            data.type ?? "",
+            data.reference ?? "",
+            data.handledBy ?? "",
+          ),
           balance:
             typeof data.balanceAfter === "number" ? data.balanceAfter : undefined,
         };
@@ -514,6 +524,7 @@ export default function SettingsPage() {
       row.qtyIn ? String(row.qtyIn) : "",
       row.qtyOut ? String(row.qtyOut) : "",
       row.balance !== undefined ? String(row.balance) : "",
+      getTransactionName(row),
       row.ref,
     ]);
 
@@ -529,6 +540,7 @@ export default function SettingsPage() {
         "In",
         "Out",
         "Balance",
+        "Receiver/Handled By",
         "Reference",
       ]],
       body: rows,
@@ -1064,6 +1076,9 @@ export default function SettingsPage() {
                   <th className="hidden px-4 py-3 md:table-cell">In</th>
                   <th className="hidden px-4 py-3 md:table-cell">Out</th>
                   <th className="hidden px-4 py-3 md:table-cell">Balance</th>
+                  <th className="hidden px-4 py-3 md:table-cell">
+                    Receiver/Handled By
+                  </th>
                   <th className="hidden px-4 py-3 md:table-cell">Reference</th>
                   <th className="px-4 py-3 text-right md:hidden">More</th>
                 </tr>
@@ -1072,7 +1087,7 @@ export default function SettingsPage() {
                 {filteredTransactions.length === 0 && (
                   <tr>
                     <td
-                      colSpan={11}
+                      colSpan={12}
                       className="px-4 py-6 text-center text-sm text-slate-500"
                     >
                       No transactions for this date range.
@@ -1103,6 +1118,9 @@ export default function SettingsPage() {
                       <td className="hidden px-4 py-3 text-slate-700 md:table-cell">
                         {row.balance ?? ""}
                       </td>
+                      <td className="hidden px-4 py-3 text-slate-600 md:table-cell">
+                        {getTransactionName(row)}
+                      </td>
                       <td className="hidden px-4 py-3 text-slate-500 md:table-cell">
                         {row.ref}
                       </td>
@@ -1123,7 +1141,7 @@ export default function SettingsPage() {
                     </tr>
                     {expandedTransactions[row.id] && (
                       <tr className="md:hidden">
-                        <td colSpan={11} className="px-4 pb-4">
+                        <td colSpan={12} className="px-4 pb-4">
                           <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
                             <div className="flex items-center justify-between">
                               <span className="text-xs font-semibold uppercase text-slate-500">
@@ -1160,6 +1178,12 @@ export default function SettingsPage() {
                                 Balance
                               </span>
                               <span>{row.balance ?? "-"}</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-semibold uppercase text-slate-500">
+                                Receiver/Handled By
+                              </span>
+                              <span>{getTransactionName(row) || "-"}</span>
                             </div>
                             <div className="flex items-center justify-between">
                               <span className="text-xs font-semibold uppercase text-slate-500">
@@ -1374,3 +1398,17 @@ export default function SettingsPage() {
     </section>
   );
 }
+  const getIncomingHandledBy = (type: string, ref: string, handledBy: string) => {
+    if (handledBy.trim()) return handledBy.trim();
+    const isIncoming =
+      type === "Incoming (Restock)" || type === "Incoming (Return)";
+    if (!isIncoming) return "";
+    const parts = ref.split(" - ");
+    if (parts.length < 2) return "";
+    return parts.slice(1).join(" - ").trim();
+  };
+
+  const getTransactionName = (row: TransactionRow) => {
+    if (row.receiverName.trim()) return row.receiverName.trim();
+    return row.handledBy.trim();
+  };
