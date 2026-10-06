@@ -188,6 +188,23 @@ const PdfIcon = (
   </svg>
 );
 
+const ExcelIcon = (
+  <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+    <path
+      d="M6 3h9l4 4v14H6V3Z"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+    />
+    <path
+      d="m9.5 11 5 6m0-6-5 6"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
 function Modal({
   title,
   open,
@@ -274,6 +291,7 @@ export default function ProductsPage() {
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
   const [productPage, setProductPage] = useState(1);
   const [productShowAll, setProductShowAll] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const hasActiveFilters =
     categoryFilter.length > 0 || productFilter.length > 0 || skuFilter.length > 0;
@@ -522,6 +540,61 @@ export default function ProductsPage() {
     const url = URL.createObjectURL(blob);
     window.open(url, "_blank", "noopener,noreferrer");
     setTimeout(() => URL.revokeObjectURL(url), 5000);
+  };
+
+  const handleExportExcel = async () => {
+    if (!pagedProducts.length || exporting) return;
+    setExporting(true);
+    try {
+      const { default: ExcelJS } = await import("exceljs");
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet("Products");
+      sheet.columns = [
+        { header: "Category", key: "category", width: 20 },
+        { header: "Product", key: "product", width: 40 },
+        { header: "SKU", key: "sku", width: 16 },
+        { header: "Unit of Measure", key: "unit", width: 16 },
+        { header: "Total Quantity", key: "totalQty", width: 16 },
+        { header: "Onhand Quantity", key: "onhandQty", width: 16 },
+      ];
+      pagedProducts.forEach((row) =>
+        sheet.addRow({
+          category: row.category,
+          product: row.product,
+          sku: row.sku,
+          unit: row.unit,
+          totalQty: row.totalQty,
+          onhandQty: row.onhandQty,
+        }),
+      );
+      const header = sheet.getRow(1);
+      header.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      header.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FF0F172A" },
+      };
+      sheet.views = [{ state: "frozen", ySplit: 1 }];
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const stamp = new Date().toISOString().slice(0, 10);
+      const pageLabel = productShowAll ? "all" : `page-${productPage}`;
+      link.href = url;
+      link.download = `products-${stamp}-${pageLabel}.xlsx`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      await logAction(user, {
+        action: `Exported ${pagedProducts.length} products to Excel`,
+        entity: "product",
+      });
+    } finally {
+      setExporting(false);
+    }
   };
 
   const saveProduct = async () => {
@@ -871,6 +944,16 @@ export default function ProductsPage() {
             <span className="relative top-[1px] inline-flex">{ListIcon}</span>
             Category List
           </Link>
+          <button
+            type="button"
+            onClick={() => void handleExportExcel()}
+            disabled={!pagedProducts.length || exporting}
+            title="Export the rows currently shown (filters and page applied)"
+            className="inline-flex items-baseline gap-2 rounded-xl border border-emerald-300 px-4 py-2 text-sm font-semibold text-emerald-700 shadow-sm hover:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <span className="relative top-[1px] inline-flex">{ExcelIcon}</span>
+            {exporting ? "Exporting..." : "Export Excel"}
+          </button>
         </div>
       </div>
 
