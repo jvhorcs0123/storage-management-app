@@ -51,6 +51,22 @@ const TruckIcon = <svg viewBox="0 0 24 24" className={iconBase} fill="none">
   <circle cx="17.5" cy="18" r="1.8" stroke="currentColor" strokeWidth="1.6" />
 </svg>;
 
+const InboundIcon = <svg viewBox="0 0 24 24" className={iconBase} fill="none">
+  <path
+    d="M4 13h4l1.5 3h5l1.5-3h4v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-6Z"
+    stroke="currentColor"
+    strokeWidth="1.6"
+    strokeLinejoin="round"
+  />
+  <path
+    d="M12 3v9m0 0 3.5-3.5M12 12 8.5 8.5"
+    stroke="currentColor"
+    strokeWidth="1.6"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  />
+</svg>;
+
 const SettingsIcon = <svg viewBox="0 0 24 24" className={iconBase} fill="none">
   <path
     d="m12 8.2 2.3-1.3 2.2 1.3.1 2.6 2.3 1.3-1.2 2.3-2.6-.1-1.3 2.3-2.3-1.2-1.3-2.3-2.6.1-1.2-2.3 2.3-1.3.1-2.6 2.2-1.3L12 8.2Z"
@@ -100,6 +116,7 @@ export default function Sidebar({
     () => [
       { label: "Homepage", href: "/", icon: HomeIcon },
       { label: "Products", href: "/products", icon: BoxIcon },
+      { label: "Inbound", href: "/inbound", icon: InboundIcon },
       { label: "Outbound", href: "/deliveries", icon: TruckIcon },
       { label: "Settings", href: "/settings", icon: SettingsIcon },
     ],
@@ -164,7 +181,9 @@ export default function Sidebar({
 
       <nav className="flex flex-1 flex-col gap-2 px-3 py-5">
         {navItems.map((item) => {
-          const active = pathname === item.href;
+          const active =
+            pathname === item.href ||
+            (item.href !== "/" && pathname.startsWith(`${item.href}/`));
           return (
             <Link
               key={item.href}
