@@ -1,16 +1,16 @@
 import {
   collection,
   doc,
-  getDocs,
   increment,
   runTransaction,
   serverTimestamp,
-  setDoc,
-  updateDoc,
+  type DocumentReference,
+  type Transaction,
 } from "firebase/firestore";
 import type { User } from "firebase/auth";
 import { db } from "@/lib/firebase";
 import { logAction } from "@/lib/logs";
+import { claimReferenceNo, getNextSeries } from "@/lib/stock";
 import { buildTransactionData } from "@/lib/transactions";
 
 export type InboundSource = "Restock" | "Returns";
@@ -58,15 +58,7 @@ function generateRefNo(year: string, series: number) {
 
 export async function getNextInboundRefNo() {
   const year = new Date().getFullYear().toString().slice(-2);
-  const snapshot = await getDocs(collection(db, "inbounds"));
-  let maxSeries = 0;
-  snapshot.docs.forEach((docSnap) => {
-    const data = docSnap.data() as { inYear?: string; series?: number };
-    if (data.inYear === year && typeof data.series === "number") {
-      maxSeries = Math.max(maxSeries, data.series);
-    }
-  });
-  return generateRefNo(year, maxSeries + 1);
+  return generateRefNo(year, await getNextSeries("inbounds", "REFNO-IN", year));
 }
 
 function refParts(referenceNo: string) {
@@ -86,25 +78,48 @@ export async function saveInboundDraft(
     items: values.items,
     status: "Draft" as InboundStatus,
   };
-  const inboundRef = existingId
-    ? doc(db, "inbounds", existingId)
-    : doc(collection(db, "inbounds"));
-  if (existingId) {
-    await updateDoc(inboundRef, fields);
-  } else {
-    await setDoc(inboundRef, {
-      referenceNo: values.referenceNo,
-      ...refParts(values.referenceNo),
+  const saved = await runTransaction(db, async (txn) => {
+    if (existingId) {
+      const inboundRef = doc(db, "inbounds", existingId);
+      const existing = await txn.get(inboundRef);
+      if (!existing.exists()) throw new Error("Inbound record not found.");
+      // Don't reopen an inbound another tab already finalized.
+      if ((existing.data().status ?? "Closed") !== "Draft") {
+        throw new Error("This inbound has already been saved.");
+      }
+      txn.update(inboundRef, fields);
+      return { id: existingId, referenceNo: values.referenceNo };
+    }
+    const claimed = await claimInboundRef(txn, values.referenceNo);
+    txn.set(claimed.ref, {
+      referenceNo: claimed.referenceNo,
+      inYear: claimed.year,
+      series: claimed.series,
       ...fields,
       createdAt: serverTimestamp(),
     });
-  }
-  await logAction(user, {
-    action: `Saved draft ${values.referenceNo}`,
-    entity: "inbound",
-    entityId: inboundRef.id,
-    entityName: values.referenceNo,
+    return { id: claimed.ref.id, referenceNo: claimed.referenceNo };
   });
+  await logAction(user, {
+    action: `Saved draft ${saved.referenceNo}`,
+    entity: "inbound",
+    entityId: saved.id,
+    entityName: saved.referenceNo,
+  });
+}
+
+// The number shown on the form is a suggestion; if someone else saved it
+// first, the next free number is used instead.
+async function claimInboundRef(txn: Transaction, suggested: string) {
+  const { inYear, series } = refParts(suggested);
+  const claimed = await claimReferenceNo(
+    txn,
+    "inbounds",
+    "REFNO-IN",
+    inYear,
+    series,
+  );
+  return { ...claimed, year: inYear };
 }
 
 // Applies the same rules as a single Incoming Stocks entry, for every item at
@@ -117,20 +132,26 @@ export async function finalizeInbound(
 ) {
   const handledBy = values.handledBy.trim();
   const isRestock = values.source === "Restock";
-  const inboundRef = existingId
-    ? doc(db, "inbounds", existingId)
-    : doc(collection(db, "inbounds"));
   const productIds = Array.from(
     new Set(values.items.map((item) => item.productId)),
   );
 
-  await runTransaction(db, async (txn) => {
+  const saved = await runTransaction(db, async (txn) => {
+    let inboundRef: DocumentReference;
+    let referenceNo = values.referenceNo;
+    let newRecord: { inYear: string; series: number } | null = null;
     if (existingId) {
+      inboundRef = doc(db, "inbounds", existingId);
       const existing = await txn.get(inboundRef);
       if (!existing.exists()) throw new Error("Inbound record not found.");
       if ((existing.data().status ?? "Closed") !== "Draft") {
         throw new Error("This inbound has already been saved.");
       }
+    } else {
+      const claimed = await claimInboundRef(txn, values.referenceNo);
+      inboundRef = claimed.ref;
+      referenceNo = claimed.referenceNo;
+      newRecord = { inYear: claimed.year, series: claimed.series };
     }
 
     const onhandById = new Map<string, number>();
@@ -164,7 +185,7 @@ export async function finalizeInbound(
           qtyIn: item.quantity,
           qtyOut: 0,
           balanceAfter,
-          reference: values.referenceNo,
+          reference: referenceNo,
           source: values.source,
           handledBy,
           date: values.dateTime.slice(0, 10),
@@ -191,16 +212,17 @@ export async function finalizeInbound(
       items: values.items,
       status: "Closed" as InboundStatus,
     };
-    if (existingId) {
-      txn.update(inboundRef, fields);
-    } else {
+    if (newRecord) {
       txn.set(inboundRef, {
-        referenceNo: values.referenceNo,
-        ...refParts(values.referenceNo),
+        referenceNo,
+        ...newRecord,
         ...fields,
         createdAt: serverTimestamp(),
       });
+    } else {
+      txn.update(inboundRef, fields);
     }
+    return { id: inboundRef.id, referenceNo };
   });
 
   for (const item of values.items) {
@@ -213,14 +235,14 @@ export async function finalizeInbound(
         qty: item.quantity,
         source: values.source,
         by: handledBy,
-        reference: values.referenceNo,
+        reference: saved.referenceNo,
       },
     });
   }
   await logAction(user, {
-    action: `Added ${values.referenceNo}`,
+    action: `Added ${saved.referenceNo}`,
     entity: "inbound",
-    entityId: inboundRef.id,
-    entityName: values.referenceNo,
+    entityId: saved.id,
+    entityName: saved.referenceNo,
   });
 }

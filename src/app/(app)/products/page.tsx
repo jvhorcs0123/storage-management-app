@@ -10,9 +10,9 @@ import {
   collection,
   doc,
   getDocs,
-  increment,
   onSnapshot,
   query,
+  runTransaction,
   updateDoc,
   where,
   writeBatch,
@@ -23,6 +23,13 @@ import MultiSelect from "@/components/MultiSelect";
 import TablePagination from "@/components/TablePagination";
 import { logAction } from "@/lib/logs";
 import { addTransaction } from "@/lib/transactions";
+import {
+  applyStockMovements,
+  compareLedgerNewestFirst,
+  createdAtMillis,
+  savedAtLabel,
+  errorMessage,
+} from "@/lib/stock";
 
 type ProductRow = {
   id: string;
@@ -279,6 +286,7 @@ export default function ProductsPage() {
       qtyIn: number;
       qtyOut: number;
       balance?: number;
+      createdAt: number;
       ref: string;
       actor: string;
     }>
@@ -474,6 +482,7 @@ export default function ProductsPage() {
         qtyIn?: number;
         qtyOut?: number;
         balanceAfter?: number;
+        createdAt?: unknown;
         reference?: string;
         handledBy?: string;
       };
@@ -484,6 +493,7 @@ export default function ProductsPage() {
         qtyIn: data.qtyIn ?? 0,
         qtyOut: data.qtyOut ?? 0,
         balance: data.balanceAfter,
+        createdAt: createdAtMillis(data.createdAt),
         ref: data.reference ?? "",
         actor: getIncomingActor(
           data.type ?? "",
@@ -492,7 +502,7 @@ export default function ProductsPage() {
         ),
       };
     });
-    entries.sort((a, b) => b.date.localeCompare(a.date));
+    entries.sort(compareLedgerNewestFirst);
 
     const docPdf = new jsPDF({ orientation: "portrait" });
     const now = new Date();
@@ -511,7 +521,10 @@ export default function ProductsPage() {
     docPdf.text(`Onhand Qty: ${row.onhandQty}`, 14, 56);
 
     const rows = entries.map((entry) => [
-      entry.date,
+      savedAtLabel(entry.createdAt)
+        ? `${entry.date}
+Saved ${savedAtLabel(entry.createdAt)}`
+        : entry.date,
       entry.type,
       entry.qtyIn ? String(entry.qtyIn) : "",
       entry.qtyOut ? String(entry.qtyOut) : "",
@@ -614,19 +627,21 @@ export default function ProductsPage() {
       return;
     }
 
-    const payload = {
+    const details = {
       product: trimmedProduct,
       category: trimmedCategory,
       sku: trimmedSku,
       unit: trimmedUnit,
       totalQty: quantity,
-      onhandQty: editingProduct ? editingProduct.onhandQty : quantity,
       notes: productForm.notes.trim(),
     };
+    const payload = { ...details, onhandQty: quantity };
 
     try {
       if (editingProduct) {
-        await updateDoc(doc(db, "products", editingProduct.id), payload);
+        // Never write onhand from the cached row: a delivery saved while this
+        // form was open would be undone.
+        await updateDoc(doc(db, "products", editingProduct.id), details);
         await logAction(user, {
           action: `Edited ${payload.product}`,
           entity: "product",
@@ -701,31 +716,37 @@ export default function ProductsPage() {
       );
       return;
     }
-    const updates =
-      incomingSource === "Restock"
-        ? { totalQty: increment(qty), onhandQty: increment(qty) }
-        : { onhandQty: increment(qty) };
-    await updateDoc(doc(db, "products", incomingProduct.id), updates);
-    await addTransaction({
-      productId: incomingProduct.id,
-      productName: incomingProduct.product,
-      category: incomingProduct.category,
-      sku: incomingProduct.sku,
-      unit: incomingProduct.unit,
-      type:
-        incomingSource === "Restock"
-          ? "Incoming (Restock)"
-          : "Incoming (Return)",
-      qtyIn: qty,
-      qtyOut: 0,
-      balanceAfter: incomingProduct.onhandQty + qty,
-      reference: incomingSource,
-      source: incomingSource,
-      handledBy: incomingByTrimmed,
-      userId: user?.uid,
-      userName: user?.displayName ?? "",
-      userEmail: user?.email ?? "",
-    });
+    try {
+      await runTransaction(db, (txn) =>
+        applyStockMovements(txn, [
+          {
+            productId: incomingProduct.id,
+            productName: incomingProduct.product,
+            category: incomingProduct.category,
+            sku: incomingProduct.sku,
+            unit: incomingProduct.unit,
+            type:
+              incomingSource === "Restock"
+                ? "Incoming (Restock)"
+                : "Incoming (Return)",
+            qtyIn: qty,
+            qtyOut: 0,
+            raiseTotal: incomingSource === "Restock",
+            reference: incomingSource,
+            source: incomingSource,
+            handledBy: incomingByTrimmed,
+            userId: user?.uid,
+            userName: user?.displayName ?? "",
+            userEmail: user?.email ?? "",
+          },
+        ]),
+      );
+    } catch (error) {
+      setIncomingError(
+        errorMessage(error, "Unable to save incoming stock. Please try again."),
+      );
+      return;
+    }
     await logAction(user, {
       action:
         incomingSource === "Restock"
@@ -751,25 +772,32 @@ export default function ProductsPage() {
       setOutgoingError("Outgoing quantity cannot exceed onhand quantity.");
       return;
     }
-    await updateDoc(doc(db, "products", outgoingProduct.id), {
-      onhandQty: increment(-qty),
-    });
-    await addTransaction({
-      productId: outgoingProduct.id,
-      productName: outgoingProduct.product,
-      category: outgoingProduct.category,
-      sku: outgoingProduct.sku,
-      unit: outgoingProduct.unit,
-      type: "Outgoing",
-      qtyIn: 0,
-      qtyOut: qty,
-      balanceAfter: outgoingProduct.onhandQty - qty,
-      reference: outgoingDestination,
-      destination: outgoingDestination,
-      userId: user?.uid,
-      userName: user?.displayName ?? "",
-      userEmail: user?.email ?? "",
-    });
+    try {
+      await runTransaction(db, (txn) =>
+        applyStockMovements(txn, [
+          {
+            productId: outgoingProduct.id,
+            productName: outgoingProduct.product,
+            category: outgoingProduct.category,
+            sku: outgoingProduct.sku,
+            unit: outgoingProduct.unit,
+            type: "Outgoing",
+            qtyIn: 0,
+            qtyOut: qty,
+            reference: outgoingDestination,
+            destination: outgoingDestination,
+            userId: user?.uid,
+            userName: user?.displayName ?? "",
+            userEmail: user?.email ?? "",
+          },
+        ]),
+      );
+    } catch (error) {
+      setOutgoingError(
+        errorMessage(error, "Unable to save outgoing stock. Please try again."),
+      );
+      return;
+    }
     await logAction(user, {
       action: `Outgoing ${outgoingProduct.product}`,
       entity: "product",
@@ -817,16 +845,18 @@ export default function ProductsPage() {
         qtyIn: number;
         qtyOut: number;
         balance?: number;
+        createdAt: number;
         ref: string;
         actor: string;
       }> = [];
       snapshot.docs.forEach((docSnap) => {
-        const data = docSnap.data() as {
+        const data = docSnap.data({ serverTimestamps: "estimate" }) as {
           type?: string;
           date?: string;
           qtyIn?: number;
           qtyOut?: number;
           balanceAfter?: number;
+          createdAt?: unknown;
           reference?: string;
           handledBy?: string;
         };
@@ -837,6 +867,7 @@ export default function ProductsPage() {
           qtyIn: data.qtyIn ?? 0,
           qtyOut: data.qtyOut ?? 0,
           balance: data.balanceAfter,
+          createdAt: createdAtMillis(data.createdAt),
           ref: data.reference ?? "",
           actor: getIncomingActor(
             data.type ?? "",
@@ -853,7 +884,7 @@ export default function ProductsPage() {
   }, [ledgerOpen, ledgerProduct]);
 
   const ledgerRows = useMemo(() => {
-    return [...ledgerEntries].sort((a, b) => b.date.localeCompare(a.date));
+    return [...ledgerEntries].sort(compareLedgerNewestFirst);
   }, [ledgerEntries]);
 
   const saveNotes = async () => {
@@ -1578,7 +1609,14 @@ export default function ProductsPage() {
               <tbody className="divide-y divide-slate-100">
                 {ledgerRows.map((entry) => (
                   <tr key={entry.id}>
-                    <td className="px-3 py-2 text-slate-600">{entry.date}</td>
+                    <td className="px-3 py-2 text-slate-600">
+                      {entry.date}
+                      {entry.createdAt > 0 && (
+                        <span className="block text-xs text-slate-400">
+                          Saved {savedAtLabel(entry.createdAt)}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-3 py-2 text-slate-700">{entry.type}</td>
                     <td className="px-3 py-2 text-right text-emerald-600">
                       {entry.qtyIn || ""}
